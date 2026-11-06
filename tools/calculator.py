@@ -1,6 +1,10 @@
 import ast
 import operator
 
+from langchain.tools import tool
+
+from tools.results import tool_result
+
 
 _BINARY_OPERATORS = {
     ast.Add: operator.add,
@@ -12,16 +16,12 @@ _BINARY_OPERATORS = {
     ast.Pow: operator.pow,
 }
 _UNARY_OPERATORS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
-MAX_EXPRESSION_LENGTH = 120
-MAX_ABS_RESULT = 1e100
-MAX_EXPONENT = 100
 
 
 def calculate(expression: str) -> int | float:
-    """Evaluate basic arithmetic without eval, names, attributes, or function calls."""
-    if len(expression) > MAX_EXPRESSION_LENGTH:
+    """Evaluate basic arithmetic without eval, names, attributes, or calls."""
+    if len(expression) > 120:
         raise ValueError("Expression is too long.")
-
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as error:
@@ -37,10 +37,10 @@ def calculate(expression: str) -> int | float:
         if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
             left = evaluate(node.left)
             right = evaluate(node.right)
-            if isinstance(node.op, ast.Pow) and abs(right) > MAX_EXPONENT:
+            if isinstance(node.op, ast.Pow) and abs(right) > 100:
                 raise ValueError("Exponent is too large.")
             result = _BINARY_OPERATORS[type(node.op)](left, right)
-            if abs(result) > MAX_ABS_RESULT:
+            if abs(result) > 1e100:
                 raise ValueError("Result is too large.")
             return result
         raise ValueError("Only numbers and basic arithmetic operators are allowed.")
@@ -49,3 +49,13 @@ def calculate(expression: str) -> int | float:
         return evaluate(tree)
     except (ArithmeticError, OverflowError) as error:
         raise ValueError(f"Could not calculate expression: {error}") from error
+
+
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a basic arithmetic expression safely."""
+    try:
+        result = calculate(expression)
+    except ValueError as error:
+        return tool_result("calculator", expression, f"Error: {error}")
+    return tool_result("calculator", expression, f"Result: {result}")

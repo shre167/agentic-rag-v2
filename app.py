@@ -1,24 +1,68 @@
 import streamlit as st
 
 from agentic_rag import answer_with_agent
-from retrieval import indexed_collection
+from retrieval.vector_store import get_collection, list_knowledge_bases
 
 
 st.set_page_config(page_title="Mind Management Chat", page_icon="📚", layout="wide")
 
-try:
-    collection = indexed_collection()
-except Exception:
-    st.warning("No indexed PDF found yet.")
-    st.code("python ingest.py")
+
+def render_agent_activity(activity: list[dict]):
+    with st.expander("Agent activity"):
+        for step_number, step in enumerate(activity, start=1):
+            st.markdown(f"**Step {step_number}**")
+            if step.get("action"):
+                st.markdown(f"**Action:** {step['action']}")
+            elif step.get("tool"):
+                st.markdown(f"**Tool:** `{step['tool']}`")
+
+            action_input = step.get("input")
+            if action_input:
+                st.markdown(f"**Input:** {action_input}")
+
+            outcome = step.get("result", "Completed")
+            tool_name = step.get("tool")
+            if tool_name == "list_book_structure" and outcome.startswith("Found "):
+                outcome = f"Retrieved book structure ({outcome.removeprefix('Found ')})"
+            elif tool_name in {"chapter_search", "section_search", "page_search", "semantic_search"}:
+                outcome = outcome.replace("Found ", "Found ", 1).replace(
+                    " passages", " supporting passages"
+                )
+            elif tool_name == "calculator" and outcome.startswith("Result:"):
+                outcome = f"Calculation complete: {outcome.removeprefix('Result:').strip()}"
+            st.markdown(f"**Outcome:** {outcome}")
+
+            citation_status = step.get("citation_status")
+            if citation_status == "validated":
+                st.success(
+                    f"Citation validation passed: {step.get('validated_citations', 0)} "
+                    "citation(s) match chunks retrieved this turn."
+                )
+            elif citation_status == "rejected":
+                st.error("Citation validation failed. Unsupported citations were rejected.")
+            elif citation_status == "not_required":
+                st.info("Citation validation not required for this tool-only answer.")
+
+
+knowledge_bases = list_knowledge_bases()
+if not knowledge_bases:
+    st.warning("No knowledge bases are indexed yet.")
+    st.code(
+        '.\\.venv\\Scripts\\python.exe ingest.py "data1\\Mind Management, Not Time Management.pdf" --book "Mind Management" --kb kb1'
+    )
     st.stop()
+
+with st.sidebar:
+    selected_kb = st.selectbox("Knowledge base", knowledge_bases)
+
+collection = get_collection(selected_kb)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 with st.sidebar:
     st.title("Mind Management")
-    st.caption("Answers grounded in the indexed book")
+    st.caption(f"Searching {selected_kb}")
     st.metric("Indexed chunks", collection.count())
 
     with st.expander("Browse indexed chunks"):
@@ -27,6 +71,10 @@ with st.sidebar:
             zip(stored["ids"], stored["documents"], stored["metadatas"]),
             key=lambda row: row[0],
         )
+        books = sorted({metadata.get("book", "Unknown") for _, _, metadata in rows})
+        selected_book = st.selectbox("Book", ["All books", *books], key="chunk_book")
+        if selected_book != "All books":
+            rows = [row for row in rows if row[2].get("book") == selected_book]
         sections = sorted({metadata.get("section", "Unknown") for _, _, metadata in rows})
         selected_section = st.selectbox(
             "Section", ["All sections", *sections], key="chunk_section"
@@ -58,13 +106,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if message.get("activity"):
-            with st.expander("Agent activity"):
-                for step in message["activity"]:
-                    action_input = step.get("input") or "(no input)"
-                    st.write(
-                        f"**{step['tool']}**: {action_input} -> "
-                        f"{step['result']}"
-                    )
+            render_agent_activity(message["activity"])
         if message.get("sources"):
             with st.expander("Sources"):
                 for rank, source in enumerate(message["sources"], start=1):
@@ -92,17 +134,11 @@ if question:
         with st.chat_message("assistant"):
             with st.spinner("Searching the book..."):
                 answer, sources, activity = answer_with_agent(
-                    question, history=history
+                    question, history=history, kb_name=selected_kb
                 )
             st.markdown(answer)
             if activity:
-                with st.expander("Agent activity"):
-                    for step in activity:
-                        action_input = step.get("input") or "(no input)"
-                        st.write(
-                            f"**{step['tool']}**: {action_input} -> "
-                            f"{step['result']}"
-                        )
+                render_agent_activity(activity)
             if sources:
                 with st.expander("Sources"):
                     for rank, source in enumerate(sources, start=1):

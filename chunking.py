@@ -10,13 +10,15 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 @dataclass
 class Section:
     text: str
+    book: str
     chapter: str
     heading: str
     page_start: int
     page_end: int
+    page_texts: list[tuple[int, str]]
 
 
-def extract_sections(pdf_path: Path) -> list[Section]:
+def extract_sections(pdf_path: Path, book_name: str) -> list[Section]:
     """Extract text grouped by PDF headings, retaining chapter and page metadata."""
     pdf = pymupdf.open(pdf_path)
     try:
@@ -34,17 +36,30 @@ def extract_sections(pdf_path: Path) -> list[Section]:
         sections = []
         chapter = "Front matter"
         heading = "Front matter"
-        body = []
+        body: list[tuple[int, str]] = []
         section_start = 1
         section_end = 1
         in_contents = False
 
         def save_section():
-            text = "\n\n".join(part for part in body if part).strip()
+            page_parts = {}
+            for body_page, part in body:
+                page_parts.setdefault(body_page, []).append(part)
+            page_texts = [
+                (body_page, "\n\n".join(parts).strip())
+                for body_page, parts in sorted(page_parts.items())
+            ]
+            text = "\n\n".join(part for _, part in page_texts if part).strip()
             if text:
-                sections.append(
-                    Section(text, chapter, heading, section_start, section_end)
-                )
+                sections.append(Section(
+                    text=text,
+                    book=book_name,
+                    chapter=chapter,
+                    heading=heading,
+                    page_start=section_start,
+                    page_end=section_end,
+                    page_texts=page_texts,
+                ))
 
         for page_number, page in enumerate(pages, start=1):
             page_text = " ".join(
@@ -107,7 +122,7 @@ def extract_sections(pdf_path: Path) -> list[Section]:
                     lines.append(text)
 
                 if lines:
-                    body.append(" ".join(lines))
+                    body.append((page_number, " ".join(lines)))
                     section_end = page_number
 
         save_section()
@@ -128,16 +143,20 @@ def make_chunks(
     )
     chunks = []
     for section in sections:
-        documents = splitter.create_documents(
-            [section.text],
-            metadatas=[
-                {
-                    "chapter": section.chapter,
-                    "section": section.heading,
-                    "page_start": section.page_start,
-                    "page_end": section.page_end,
-                }
-            ],
-        )
-        chunks.extend((document.page_content, document.metadata) for document in documents)
+        for page_number, page_text in section.page_texts:
+            documents = splitter.create_documents(
+                [page_text],
+                metadatas=[
+                    {
+                        "book": section.book,
+                        "chapter": section.chapter,
+                        "section": section.heading,
+                        "page_start": page_number,
+                        "page_end": page_number,
+                    }
+                ],
+            )
+            chunks.extend(
+                (document.page_content, document.metadata) for document in documents
+            )
     return chunks

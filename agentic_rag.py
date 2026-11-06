@@ -1,198 +1,185 @@
+import json
 import os
+import re
 
 from dotenv import load_dotenv
-from langchain.agents import create_agent
-from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 
-from retrieval import NO_SOURCE_ANSWER, indexed_collection, retrieve_chunks
-from safe_calculator import calculate
+from agent.bookagent import build_agent
+from retrieval.retrieval import NO_SOURCE_ANSWER
 from settings import ROOT
 
 
 load_dotenv(ROOT / ".env")
-MAX_SEARCH_CALLS = 3
-MAX_TOOL_CALLS = 6
+
+
+def validate_citations(
+    raw_response: str, retrieved_ids: set[str]
+) -> tuple[str, list[str], bool]:
+    """Accept only JSON answers whose citations were retrieved this turn."""
+    content = raw_response.strip()
+    if content.startswith("```json"):
+        content = content[7:]
+    elif content.startswith("```"):
+        content = content[3:]
+    if content.endswith("```"):
+        content = content[:-3]
+    content = content.strip()
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start < 0 or end <= start:
+            return NO_SOURCE_ANSWER, [], False
+        try:
+            payload = json.loads(content[start : end + 1])
+        except json.JSONDecodeError:
+            return NO_SOURCE_ANSWER, [], False
+
+    if not isinstance(payload, dict):
+        return NO_SOURCE_ANSWER, [], False
+    answer = payload.get("answer")
+    source_ids = payload.get("sources")
+    if (
+        not isinstance(answer, str)
+        or not isinstance(source_ids, list)
+        or any(not isinstance(source_id, str) for source_id in source_ids)
+    ):
+        return NO_SOURCE_ANSWER, [], False
+
+    source_ids = list(dict.fromkeys(source_ids))
+    inline_ids = re.findall(r"\[([^\[\]]+)\]", answer)
+    if (
+        not set(source_ids).issubset(retrieved_ids)
+        or not set(inline_ids).issubset(retrieved_ids)
+        or not set(inline_ids).issubset(source_ids)
+    ):
+        return NO_SOURCE_ANSWER, [], False
+    if answer.strip() != NO_SOURCE_ANSWER and retrieved_ids and not source_ids:
+        return NO_SOURCE_ANSWER, [], False
+    return answer.strip(), source_ids, True
+
+
+def _tool_payload(message) -> dict | None:
+    content = getattr(message, "content", "")
+    if not isinstance(content, str):
+        return None
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) and "tool" in payload else None
 
 
 def answer_with_agent(
-    question: str, history: list[dict] | None = None, k: int = 5
+    question: str,
+    history: list[dict] | None = None,
+    k: int = 5,
+    kb_name: str = "kb1",
 ) -> tuple[str, list[dict], list[dict]]:
-    """Let a LangChain agent decide when and how to search the indexed book."""
+    """Run the modular LangChain agent and return a validated answer and sources."""
     api_key = os.getenv("GE_API_KEY")
     base_url = os.getenv("LLM_BASE_URL")
     model_name = os.getenv("LLM_MODEL")
     if not all([api_key, base_url, model_name]):
         raise RuntimeError("Set GE_API_KEY, LLM_BASE_URL, and LLM_MODEL in .env.")
 
-    sources_by_id: dict[str, dict] = {}
+    llm = ChatOpenAI(model=model_name, api_key=api_key, base_url=base_url)
+    agent = build_agent(llm)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"The user selected knowledge base '{kb_name}'. Use this exact kb_name "
+                "argument for every knowledge-base search tool call. Do not search other "
+                "collections unless the application explicitly selects them."
+            ),
+        },
+        *list(history or [])[-6:],
+        {"role": "user", "content": question},
+    ]
+    result = agent.invoke({"messages": messages})
+
     activity = []
-    calculations = []
-
-    def action_limit_reached() -> bool:
-        return len(activity) >= MAX_TOOL_CALLS
-
-    def record_action(tool_name: str, query: str, result: str, matches: int):
+    passages_by_id = {}
+    calculator_used = False
+    for message in result["messages"]:
+        if getattr(message, "type", None) != "tool":
+            continue
+        payload = _tool_payload(message)
+        if not payload:
+            continue
         activity.append(
             {
-                "tool": tool_name,
-                "input": query,
-                "result": result,
-                "matches": matches,
+                "tool": payload.get("tool", "tool"),
+                "input": payload.get("input", ""),
+                "result": payload.get("result", ""),
+                "matches": len(payload.get("passages", [])),
             }
         )
+        if payload.get("tool") == "calculator":
+            calculator_used = True
+        for passage in payload.get("passages", []):
+            if isinstance(passage, dict) and isinstance(passage.get("id"), str):
+                passages_by_id[passage["id"]] = passage
 
-    @tool
-    def search_book(query: str, scope: str = "") -> str:
-        """Semantic-search the book; optionally limit to an exact chapter or section name."""
-        if action_limit_reached():
-            return "Tool-call limit reached. Use the evidence gathered so far."
-        if sum(step["tool"] == "search_book" for step in activity) >= MAX_SEARCH_CALLS:
-            return "Search limit reached. Use the evidence gathered so far."
-
-        passages = retrieve_chunks(query, k=k, scope=scope or None)
-        action_input = f"{query} [scope: {scope}]" if scope else query
-        record_action(
-            "search_book",
-            action_input,
-            f"Found {len(passages)} relevant passages" if passages else "No relevant passages",
-            len(passages),
-        )
-        if not passages:
-            return "NO_RELEVANT_PASSAGES: the indexed book has no relevant source for this query."
-
-        formatted = []
-        for passage in passages:
-            source_id = passage["id"]
-            sources_by_id[source_id] = passage
-            formatted.append(
-                f"[{source_id}] Chapter {passage.get('chapter', 'Unknown')}, "
-                f"{passage.get('section', 'Unknown')}, "
-                f"pages {passage.get('page_start', '?')}-{passage.get('page_end', '?')}\n"
-                f"{passage['text']}"
-            )
-        return "\n\n".join(formatted)
-
-    @tool
-    def calculator(expression: str) -> str:
-        """Calculate a basic arithmetic expression using numbers and arithmetic operators."""
-        if action_limit_reached():
-            return "Tool-call limit reached."
-        try:
-            result = calculate(expression)
-        except ValueError as error:
-            record_action("calculator", expression, "Invalid expression", 0)
-            return str(error)
-        calculations.append({"expression": expression, "result": result})
-        record_action("calculator", expression, f"Result: {result}", 0)
-        return str(result)
-
-    @tool
-    def list_book_sections() -> str:
-        """List chapter and section headings available in the indexed book."""
-        if action_limit_reached():
-            return "Tool-call limit reached. Use the evidence gathered so far."
-        stored = indexed_collection().get(include=["metadatas"])
-        headings = sorted(
-            {
-                f"{metadata.get('chapter', 'Unknown chapter')}: "
-                f"{metadata.get('section', 'Unknown section')}"
-                for metadata in stored["metadatas"]
-            }
-        )
-        record_action("list_book_sections", "", f"Found {len(headings)} headings", len(headings))
-        return "\n".join(headings) if headings else "The book index has no section headings."
-
-    @tool
-    def get_section_passages(section: str) -> str:
-        """Read indexed passages from a named chapter or section heading."""
-        if action_limit_reached():
-            return "Tool-call limit reached. Use the evidence gathered so far."
-        stored = indexed_collection().get(include=["documents", "metadatas"])
-        requested = section.casefold().strip()
-        matches = []
-        for chunk_id, text, metadata in zip(
-            stored["ids"], stored["documents"], stored["metadatas"]
-        ):
-            heading = metadata.get("section", "")
-            chapter = metadata.get("chapter", "")
-            heading_normalized = heading.casefold()
-            chapter_normalized = chapter.casefold()
-            if (
-                requested in heading_normalized
-                or heading_normalized in requested
-                or requested in chapter_normalized
-                or chapter_normalized in requested
-            ):
-                passage = {
-                    "id": chunk_id,
-                    "text": text,
-                    **metadata,
-                }
-                matches.append(passage)
-                sources_by_id[chunk_id] = passage
-                if len(matches) >= k:
-                    break
-
-        record_action(
-            "get_section_passages",
-            section,
-            f"Found {len(matches)} passages" if matches else "No matching section",
-            len(matches),
-        )
-        if not matches:
-            return "NO_RELEVANT_PASSAGES: no indexed heading matches that section."
-        return "\n\n".join(
-            f"[{passage['id']}] Chapter {passage.get('chapter', 'Unknown')}, "
-            f"{passage.get('section', 'Unknown')}, pages "
-            f"{passage.get('page_start', '?')}-{passage.get('page_end', '?')}\n"
-            f"{passage['text']}"
-            for passage in matches
-        )
-
-    llm = ChatOpenAI(
-        model=model_name,
-        api_key=api_key,
-        base_url=base_url,
-    )
-    agent = create_agent(
-        model=llm,
-        tools=[search_book, list_book_sections, get_section_passages, calculator],
-        system_prompt=(
-            "You are a book-grounded ReAct assistant. For arithmetic-only questions, use "
-            "calculator first and do not search the book; translate natural-language math "
-            "into a basic arithmetic expression (for example, '18 percent of 250' becomes "
-            "'(18 / 100) * 250'). For factual questions about the book, first use search_book. "
-            "You may use list_book_sections to discover headings and "
-            "get_section_passages to read a known heading. Refine or repeat semantic searches "
-            "or pass an exact chapter/section as search_book's scope to target a part of the book. "
-            "Use calculator for arithmetic instead of mental math. "
-            "Repeat or refine a search when evidence is weak or incomplete. Use no more than "
-            f"{MAX_SEARCH_CALLS} semantic searches and {MAX_TOOL_CALLS} total tool calls. "
-            "Answer only from passage text returned by search_book or get_section_passages; "
-            "section listings are navigation only, not evidence. "
-            "If no relevant passage is returned, say exactly: "
-            f"{NO_SOURCE_ANSWER} Do not use outside knowledge. Cite each claim with the "
-            "exact chunk ID in brackets, for example [19a1c91f09bd-00068]. Never invent "
-            "a citation or cite a chunk that the tool did not return."
+    final_message = next(
+        (
+            message
+            for message in reversed(result["messages"])
+            if getattr(message, "type", None) == "ai"
+            and not getattr(message, "tool_calls", None)
         ),
+        None,
+    )
+    if final_message is None:
+        activity.append(
+            {
+                "action": "Generate grounded answer",
+                "result": "No final answer was produced",
+                "citation_status": "rejected",
+            }
+        )
+        return NO_SOURCE_ANSWER, [], activity
+
+    raw_answer = final_message.content
+    if isinstance(raw_answer, list):
+        raw_answer = "".join(
+            part.get("text", "") for part in raw_answer if isinstance(part, dict)
+        )
+    answer, cited_ids, valid_response = validate_citations(
+        str(raw_answer), set(passages_by_id)
     )
 
-    messages = list(history or [])[-6:]
-    messages.append({"role": "user", "content": question})
-    result = agent.invoke({"messages": messages})
-    final_message = result["messages"][-1]
-    answer = final_message.content
-    if isinstance(answer, list):
-        answer = "".join(
-            part.get("text", "") for part in answer if isinstance(part, dict)
+    if not passages_by_id and not calculator_used:
+        activity.append(
+            {
+                "action": "Generate grounded answer",
+                "result": NO_SOURCE_ANSWER,
+                "citation_status": "no_sources",
+            }
         )
-    answer = str(answer).strip()
+        return NO_SOURCE_ANSWER, [], activity
+    if not valid_response:
+        activity.append(
+            {
+                "action": "Generate grounded answer",
+                "result": "Answer rejected because citations were invalid or malformed",
+                "citation_status": "rejected",
+            }
+        )
+        return NO_SOURCE_ANSWER, [], activity
 
-    if not sources_by_id and not calculations:
-        answer = NO_SOURCE_ANSWER
-    elif answer.strip().upper() in {"[NO_SOURCES]", "NO_SOURCES"}:
-        answer = NO_SOURCE_ANSWER
-        sources_by_id.clear()
-
-    return answer or NO_SOURCE_ANSWER, list(sources_by_id.values()), activity
+    sources = [passages_by_id[source_id] for source_id in cited_ids]
+    citation_status = "validated" if cited_ids else "not_required"
+    activity.append(
+        {
+            "action": "Generate grounded answer",
+            "result": "Answer generated with validated sources",
+            "citation_status": citation_status,
+            "validated_citations": len(cited_ids),
+        }
+    )
+    return answer or NO_SOURCE_ANSWER, sources, activity
