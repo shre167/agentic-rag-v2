@@ -183,3 +183,10 @@ updated semantic_search.py
 the full terminal traceback
 
 and we'll fix the next blocker.. That's the next thing we need to inspect.
+
+Get-ChildItem -Path . -Recurse -File -Filter *.py |
+Where-Object { $_.FullName -notmatch '\\(\.venv|venv|__pycache__)\\' } |
+Select-String -Pattern 'tool_result\s*\(|tool_name\s*=' |
+ForEach-Object {
+    "$($_.Path):$($_.LineNumber): $($_.Line.Trim())"
+}
