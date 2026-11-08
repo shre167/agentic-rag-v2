@@ -112,5 +112,7 @@ venv\Lib\site-packages\langchain_community\chat_models\oci_generative_ai.py:286:
 venv\Lib\site-packages\langsmith\integrations\pipecat\processor.py:317:            return self._handle_tool_result(tspan, trace_id)
 venv\Lib\site-packages\langsmith\integrations\pipecat\processor.py:441:    def _handle_tool_result(self, tspan: TranslatedSpan, trace_id: int) -> bool:
 
-
-(.venv) PS C:\Users\shrsamal\OneDrive - Capgemini\Desktop\simple-rag> 
+GE_API_KEY=
+LLM_BASE_URL=https://openai.generative.engine.capgemini.com/v1
+LLM_MODEL=openai.gpt-5-mini
+EMBEDDING_MODEL=amazon.titan-embed-text-v2:0
