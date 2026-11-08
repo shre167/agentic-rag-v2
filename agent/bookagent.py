@@ -12,16 +12,18 @@ from tools.calculator import calculator
 
 
 def build_agent(llm):
+    tools = [
+        semantic_search,
+        chapter_search,
+        section_search,
+        page_search,
+        list_books,
+        list_book_structure,
+        calculator,
+    ]
+    
+    # Add system prompt to messages
     return create_agent(
         model=llm,
-        tools=[
-            semantic_search,
-            chapter_search,
-            section_search,
-            page_search,
-            list_books,
-            list_book_structure,
-            calculator,
-        ],
-        system_prompt=SYSTEM_PROMPT,
+        tools=tools,
     )

@@ -15,6 +15,14 @@ Use chapter_search, section_search, or page_search when the user specifies that 
 otherwise use semantic_search. Use calculator for arithmetic.
 
 Never use outside knowledge for book facts. Every factual claim must be supported by
-retrieved passages. Cite exact retrieved chunk IDs and never invent citations. Return
-the required JSON answer and sources format.
+retrieved passages. Cite exact retrieved chunk IDs and never invent citations.
+
+CRITICAL: You MUST return your final answer in this exact JSON format:
+{
+  "answer": "Your answer here with inline citations like [chunk-id-12345]",
+  "sources": ["chunk-id-12345", "chunk-id-67890"]
+}
+
+The chunk IDs in your citations [like-this] and in the sources array MUST exactly match
+the IDs from the passages you retrieved. Do not invent or modify chunk IDs.
 """

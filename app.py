@@ -1,3 +1,24 @@
+import sys
+
+# Increase recursion limit
+sys.setrecursionlimit(10000)
+
+# Monkey-patch to fix Python 3.13 + truststore recursion bug
+import ssl
+if sys.version_info >= (3, 13):
+    _SSLContext = ssl.SSLContext
+    _original_init = _SSLContext.__init__
+    
+    def _patched_init(self, *args, **kwargs):
+        _original_init(self, *args, **kwargs)
+        try:
+            self.check_hostname = False
+            self._verify_mode = ssl.CERT_NONE
+        except:
+            pass
+    
+    _SSLContext.__init__ = _patched_init
+
 import streamlit as st
 
 from agentic_rag import answer_with_agent
@@ -53,7 +74,19 @@ if not knowledge_bases:
     st.stop()
 
 with st.sidebar:
-    selected_kb = st.selectbox("Knowledge base", knowledge_bases)
+    selected_kbs = st.multiselect(
+        "Knowledge bases", 
+        knowledge_bases,
+        default=[knowledge_bases[0]] if knowledge_bases else []
+    )
+    
+if not selected_kbs:
+    st.warning("Please select at least one knowledge base")
+    st.stop()
+
+# For now, use the first selected KB (single KB mode)
+# Multi-KB queries would need agent to query each KB separately
+selected_kb = selected_kbs[0]
 
 collection = get_collection(selected_kb)
 
