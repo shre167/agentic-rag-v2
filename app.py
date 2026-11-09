@@ -12,8 +12,24 @@ st.set_page_config(
     layout="wide",
 )
 
+# Answer type display config
+_ANSWER_TYPE_META = {
+    "book":    {"icon": "📖", "label": "Book answer",    "color": "green"},
+    "web":     {"icon": "🌐", "label": "Web answer",     "color": "blue"},
+    "mixed":   {"icon": "🔀", "label": "Mixed answer",   "color": "orange"},
+    "general": {"icon": "🤖", "label": "General answer", "color": "gray"},
+}
+
+# Tool display config
+_TOOL_META = {
+    "list_books":      {"icon": "📋", "label": "List Books"},
+    "semantic_search": {"icon": "🔍", "label": "Semantic Search (Book)"},
+    "web_search":      {"icon": "🌐", "label": "Web Search"},
+}
+
 
 def render_agent_activity(activity: List[Dict]):
+    """Render detailed tool execution trace with per-tool reasoning, repeated call explanations, and findings."""
     trace_steps = [
         s for s in activity
         if s.get("action") != "Agent Dynamic Reasoning & Strategy"
@@ -21,49 +37,79 @@ def render_agent_activity(activity: List[Dict]):
     if not trace_steps:
         return
 
-    with st.expander("⚙️ Tool Execution Trace", expanded=False):
+    with st.expander("⚙️ Tool Execution Trace (Step-by-Step Reasons & Discoveries)", expanded=False):
         for step_number, step in enumerate(trace_steps, start=1):
             tool_name = step.get("tool")
             action = step.get("action")
+            meta = _TOOL_META.get(tool_name, {"icon": "🔧", "label": tool_name or action})
 
-            st.markdown(f"---\n### Step {step_number}: `{tool_name or action}`")
+            st.markdown(f"---\n### {meta['icon']} Step {step_number} — {meta['label']}")
 
-            # Per-tool LLM reasoning (the LLM's thought before calling this tool).
+            # 1. WHY this tool was called
             tool_reasoning = step.get("tool_reasoning")
             if tool_reasoning:
-                st.info(f"💭 **Why this tool was called:** {tool_reasoning}")
+                st.info(f"🎯 **Why this tool was called:**\n\n{tool_reasoning}")
 
-            # Show routing map if list_books returned one.
-            routing_map = step.get("routing_map")
-            if routing_map and isinstance(routing_map, dict):
-                st.markdown("**Discovered knowledge bases:**")
-                for kb, title in routing_map.items():
-                    st.markdown(f"  - `{kb}` → *{title}*")
+            # 2. WHY a repeated call occurred (if this tool was invoked >1 time)
+            why_repeated = step.get("why_repeated")
+            if why_repeated:
+                st.warning(f"🔁 **Why this repeated call was needed:**\n\n{why_repeated}")
 
+            # 3. WHY web search instead of semantic search (for web_search)
+            why_web = step.get("why_web_instead_of_semantic")
+            if why_web:
+                st.markdown(
+                    f"> 🌐 **Decision: Why Web Search instead of Book Search?**  \n"
+                    f"> *{why_web}*"
+                )
+
+            # 4. WHAT was sent to the tool
             action_input = step.get("input")
             if action_input:
-                st.markdown(f"**Input:** `{action_input}`")
+                st.markdown(f"**📤 Query Sent:** `{action_input}`")
 
-            outcome = step.get("result", "Completed")
-            if tool_name in {"semantic_search", "chapter_search", "section_search", "page_search"}:
-                outcome = outcome.replace(" passages", " supporting passages")
+            # 5. WHAT list_books discovered (routing map)
+            routing_map = step.get("routing_map")
+            if routing_map and isinstance(routing_map, dict):
+                st.markdown("**📋 Discovered Knowledge Bases:**")
+                for kb, title in routing_map.items():
+                    st.markdown(f"&nbsp;&nbsp;• `{kb}` = *{title}*")
 
-            st.markdown(f"**Outcome:** {outcome}")
+            # 6. WHAT was found
+            found_summary = step.get("found_summary") or step.get("result", "Completed")
+            matches = step.get("matches", 0)
 
-            matches = step.get("matches")
-            if matches is not None and tool_name == "semantic_search":
-                st.markdown(f"**Chunks retrieved:** {matches}")
+            st.markdown(f"**📥 What was found:** {found_summary}")
 
+            what_found_items = step.get("what_found_items") or []
+            if what_found_items and tool_name == "semantic_search":
+                with st.expander(f"View {len(what_found_items)} retrieved chunk metadata (pages & lines)", expanded=False):
+                    for item in what_found_items:
+                        st.markdown(f"- {item}")
+
+            elif tool_name == "web_search":
+                web_results = step.get("web_results") or []
+                if web_results:
+                    with st.expander(f"View {len(web_results)} web search results & links", expanded=False):
+                        for r in web_results:
+                            st.markdown(
+                                f"**[{r['rank']}] [{r['title']}]({r['url']})** *(via {r.get('engine','Web')})*  \n"
+                                f"{r.get('snippet', '')}"
+                            )
+
+            # 7. Citation status
             citation_status = step.get("citation_status")
+            answer_type_label = step.get("answer_type", "")
             if citation_status == "validated":
                 st.success(
-                    f"Citation validation passed: "
-                    f"{step.get('validated_citations', 0)} citation(s) verified."
+                    f"✓ Citations validated: {step.get('validated_citations', 0)} "
+                    f"verified ({answer_type_label} answer)."
                 )
             elif citation_status == "rejected":
-                st.error("Citation validation failed. Unsupported citations were rejected.")
+                st.error("✗ Citation validation failed.")
             elif citation_status == "not_required":
-                st.info("Citation validation not required for this answer.")
+                st.info("ℹ️ No citation validation required for this answer.")
+
 
 
 # --------------------------------------------------
@@ -191,40 +237,59 @@ if "messages" not in st.session_state:
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
+        # Answer type badge for replayed assistant messages
+        if message["role"] == "assistant" and message.get("answer_type"):
+            at_meta = _ANSWER_TYPE_META.get(message["answer_type"], _ANSWER_TYPE_META["book"])
+            st.caption(f"{at_meta['icon']} **{at_meta['label']}**")
+
         st.markdown(message["content"])
 
         if message.get("reasoning"):
-            with st.expander("🧠 Agent Dynamic Reasoning & Strategy", expanded=True):
+            with st.expander("🧠 Agent Dynamic Reasoning & Strategy", expanded=False):
                 st.markdown(message["reasoning"])
 
         if message.get("activity"):
             render_agent_activity(message["activity"])
 
         if message.get("sources"):
-            with st.expander("📚 Retrieved Sources & Citations"):
-                for source in message["sources"]:
-                    lines_info = (
-                        f", lines {source['line_start']}-{source['line_end']}"
-                        if "line_start" in source
-                        else ""
-                    )
-                    st.markdown(
-                        f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
-                        f"(Chapter {source['chapter']}, pages {source['page_start']}-{source['page_end']}{lines_info})"
-                    )
-                    st.write(source["text"])
+            book_sources = [s for s in message["sources"] if s.get("source") != "web"]
+            web_sources  = [s for s in message["sources"] if s.get("source") == "web"]
+
+            if book_sources:
+                with st.expander("📖 Book Sources & Citations"):
+                    for source in book_sources:
+                        lines_info = (
+                            f", lines {source['line_start']}-{source['line_end']}"
+                            if "line_start" in source
+                            else ""
+                        )
+                        st.markdown(
+                            f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
+                            f"(Chapter {source.get('chapter','')}, "
+                            f"pp. {source['page_start']}-{source['page_end']}{lines_info})"
+                        )
+                        st.write(source["text"])
+
+            if web_sources:
+                with st.expander("🌐 Web Sources"):
+                    for source in web_sources:
+                        st.markdown(
+                            f"**[{source['id']}] [{source.get('title', source['id'])}]({source.get('url', '')})**"
+                        )
+                        st.write(source.get("text", ""))
 
 
 if not st.session_state.messages:
     st.info(
-        "Ask a question to start. Examples:\n"
-        "- *'Compare focus and distraction in Mind Management and Deep Work'* (Searches multiple collections)\n"
-        "- *'What does line 12 of page 10 say in Mind Management?'* (Line & page metadata search)\n"
-        "- *'What are the key ideas in Deep Work chapter 1?'* (Chapter metadata search)"
+        "💡 **Ask any question to get started. Examples:**\n"
+        "- 📖 **Multi-Book Comparison**: *'Compare focus and distraction in Mind Management and Deep Work'* *(agent queries both collections & explains why)*\n"
+        "- 🎯 **Line & Page Lookup**: *'What does line 12 of page 10 say in Mind Management?'* *(precise metadata retrieval)*\n"
+        "- 📚 **Chapter Deep Dive**: *'What are the core arguments in Deep Work chapter 1?'* *(chapter-filtered retrieval)*\n"
+        "- 🌐 **External / Web Query**: *'Who is the CEO of Google and what are recent AI developments?'* *(agent detects topic is outside books & switches to web search)*"
     )
 
 
-question = st.chat_input("Ask a question across all books...")
+question = st.chat_input("Ask a question across indexed books or any external/web topic...")
 
 if question:
     st.session_state.messages.append(
@@ -258,13 +323,18 @@ if question:
             sources = result[1]
             activity = result[2]
             reasoning = getattr(result, "reasoning", None)
+            answer_type = getattr(result, "answer_type", "book")
 
-            # If reasoning not on attribute, check activity
+            # Fallback: get reasoning from activity if not on result attribute
             if not reasoning:
                 for step in activity:
                     if step.get("reasoning"):
                         reasoning = step["reasoning"]
                         break
+
+            # Answer type badge
+            at_meta = _ANSWER_TYPE_META.get(answer_type, _ANSWER_TYPE_META["book"])
+            st.caption(f"{at_meta['icon']} **{at_meta['label']}**")
 
             st.markdown(answer)
 
@@ -276,18 +346,32 @@ if question:
                 render_agent_activity(activity)
 
             if sources:
-                with st.expander("📚 Retrieved Sources & Citations"):
-                    for source in sources:
-                        lines_info = (
-                            f", lines {source['line_start']}-{source['line_end']}"
-                            if "line_start" in source
-                            else ""
-                        )
-                        st.markdown(
-                            f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
-                            f"(Chapter {source['chapter']}, pages {source['page_start']}-{source['page_end']}{lines_info})"
-                        )
-                        st.write(source["text"])
+                # Separate book sources from web sources
+                book_sources = [s for s in sources if s.get("source") != "web"]
+                web_sources  = [s for s in sources if s.get("source") == "web"]
+
+                if book_sources:
+                    with st.expander("📖 Book Sources & Citations"):
+                        for source in book_sources:
+                            lines_info = (
+                                f", lines {source['line_start']}-{source['line_end']}"
+                                if "line_start" in source
+                                else ""
+                            )
+                            st.markdown(
+                                f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
+                                f"(Chapter {source.get('chapter','')}, "
+                                f"pp. {source['page_start']}-{source['page_end']}{lines_info})"
+                            )
+                            st.write(source["text"])
+
+                if web_sources:
+                    with st.expander("🌐 Web Sources"):
+                        for source in web_sources:
+                            st.markdown(
+                                f"**[{source['id']}] [{source.get('title', source['id'])}]({source.get('url', '')})**"
+                            )
+                            st.write(source.get("text", ""))
 
         st.session_state.messages.append(
             {
@@ -296,6 +380,7 @@ if question:
                 "sources": sources,
                 "activity": activity,
                 "reasoning": reasoning,
+                "answer_type": answer_type,
             }
         )
 
