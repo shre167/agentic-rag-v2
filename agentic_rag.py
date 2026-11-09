@@ -13,11 +13,27 @@ from settings import ROOT
 load_dotenv(ROOT / ".env")
 
 
+class AgentResult(tuple):
+    """3-tuple subclass for backwards compatibility with answer, sources, activity, plus reasoning attribute."""
+    answer: str
+    sources: list[dict]
+    activity: list[dict]
+    reasoning: str | None
+
+    def __new__(cls, answer: str, sources: list[dict], activity: list[dict], reasoning: str | None = None):
+        instance = super().__new__(cls, (answer, sources, activity))
+        instance.answer = answer
+        instance.sources = sources
+        instance.activity = activity
+        instance.reasoning = reasoning
+        return instance
+
+
 def validate_citations(
     raw_response: str,
     retrieved_ids: set[str],
-) -> tuple[str, list[str], bool]:
-    """Accept only JSON answers whose citations were retrieved this turn."""
+) -> tuple[str, list[str], bool, str | None]:
+    """Accept only JSON answers whose citations were retrieved this turn. Also extract agent reasoning."""
 
     content = raw_response.strip()
 
@@ -41,25 +57,28 @@ def validate_citations(
         end = content.rfind("}")
 
         if start < 0 or end <= start:
-            return NO_SOURCE_ANSWER, [], False
+            return NO_SOURCE_ANSWER, [], False, None
 
         try:
             payload = json.loads(content[start : end + 1])
         except json.JSONDecodeError:
-            return NO_SOURCE_ANSWER, [], False
+            return NO_SOURCE_ANSWER, [], False, None
 
     if not isinstance(payload, dict):
-        return NO_SOURCE_ANSWER, [], False
+        return NO_SOURCE_ANSWER, [], False, None
 
     answer = payload.get("answer")
     source_ids = payload.get("sources")
+    reasoning = payload.get("reasoning")
+    if not isinstance(reasoning, str):
+        reasoning = None
 
     if (
         not isinstance(answer, str)
         or not isinstance(source_ids, list)
         or any(not isinstance(source_id, str) for source_id in source_ids)
     ):
-        return NO_SOURCE_ANSWER, [], False
+        return NO_SOURCE_ANSWER, [], False, reasoning
 
     # Remove duplicate source IDs.
     source_ids = list(dict.fromkeys(source_ids))
@@ -79,13 +98,13 @@ def validate_citations(
         or not set(inline_ids).issubset(retrieved_ids)
         or not set(inline_ids).issubset(source_ids)
     ):
-        return NO_SOURCE_ANSWER, [], False
+        return NO_SOURCE_ANSWER, [], False, reasoning
 
     # A grounded answer must contain source IDs when sources were retrieved.
     if answer.strip() != NO_SOURCE_ANSWER and retrieved_ids and not source_ids:
-        return NO_SOURCE_ANSWER, [], False
+        return NO_SOURCE_ANSWER, [], False, reasoning
 
-    return answer.strip(), source_ids, True
+    return answer.strip(), source_ids, True, reasoning
 
 
 def _tool_payload(message) -> dict | None:
@@ -108,9 +127,9 @@ def answer_with_agent(
     question: str,
     history: list[dict] | None = None,
     k: int = 5,
-    kb_name: str = "kb1",
-) -> tuple[str, list[dict], list[dict]]:
-    """Run the modular LangChain agent and return a validated answer and sources."""
+    kb_name: str | None = None,
+) -> AgentResult:
+    """Run the modular LangChain agent and return a validated answer, sources, activity, and dynamic reasoning."""
 
     # Load LLM configuration.
     api_key = os.getenv("GE_API_KEY")
@@ -128,23 +147,22 @@ def answer_with_agent(
         base_url=base_url,
     )
 
-    # Build the existing agent.
+    # Build the agent.
     agent = build_agent(llm)
 
+    # Optionally inject a soft context hint (never constrains routing).
+    context_note = ""
+    if kb_name:
+        context_note = (
+            f"Context hint: the user currently has '{kb_name}' open in the viewer, "
+            "but you are free to query any or all collections as needed."
+        )
+
     messages = [
-        {
-            "role": "system",
-            "content": (
-                f"The user selected knowledge base '{kb_name}'. "
-                "Use this exact kb_name argument for every knowledge-base "
-                "search tool call. Do not search other collections unless "
-                "the application explicitly selects them."
-            ),
-        },
         *list(history or [])[-6:],
         {
             "role": "user",
-            "content": question,
+            "content": f"{context_note}\n\n{question}".strip() if context_note else question,
         },
     ]
 
@@ -207,7 +225,7 @@ def answer_with_agent(
             }
         )
 
-        return NO_SOURCE_ANSWER, [], activity
+        return AgentResult(NO_SOURCE_ANSWER, [], activity, None)
 
     raw_answer = final_message.content
 
@@ -220,18 +238,18 @@ def answer_with_agent(
             and isinstance(part.get("text", ""), str)
         )
 
-    # DEBUG: Inspect the exact LLM response before validation.
-    print("\n" + "=" * 80)
-    print("RAW MODEL RESPONSE")
-    print("=" * 80)
-    print(raw_answer)
-    print("=" * 80 + "\n")
-
-    # Validate answer and citations.
-    answer, cited_ids, valid_response = validate_citations(
+    # Validate answer, citations, and extract reasoning.
+    answer, cited_ids, valid_response, reasoning = validate_citations(
         str(raw_answer),
         set(passages_by_id),
     )
+
+    if reasoning:
+        activity.insert(0, {
+            "action": "Agent Dynamic Reasoning & Strategy",
+            "result": reasoning,
+            "reasoning": reasoning,
+        })
 
     # Reject unsupported answers unless calculator was used.
     if not passages_by_id and not calculator_used:
@@ -244,7 +262,7 @@ def answer_with_agent(
             }
         )
 
-        return NO_SOURCE_ANSWER, [], activity
+        return AgentResult(NO_SOURCE_ANSWER, [], activity, reasoning)
 
     # Reject malformed responses or invalid citations.
     if not valid_response:
@@ -260,7 +278,7 @@ def answer_with_agent(
             }
         )
 
-        return NO_SOURCE_ANSWER, [], activity
+        return AgentResult(NO_SOURCE_ANSWER, [], activity, reasoning)
 
     # Return only validated source passages.
     sources = [
@@ -279,4 +297,4 @@ def answer_with_agent(
         }
     )
 
-    return answer or NO_SOURCE_ANSWER, sources, activity
+    return AgentResult(answer or NO_SOURCE_ANSWER, sources, activity, reasoning)
