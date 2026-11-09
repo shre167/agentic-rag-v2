@@ -1,10 +1,12 @@
+"""PDF text extraction with structure-aware chunking."""
+
 import re
 import statistics
-from dataclasses import dataclass
 from pathlib import Path
+from dataclasses import dataclass
 
 import pymupdf
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 
 @dataclass
@@ -12,6 +14,7 @@ class Section:
     text: str
     book: str
     chapter: str
+    chapter_number: int  # NEW: Numeric chapter for easy filtering
     heading: str
     page_start: int
     page_end: int
@@ -30,16 +33,15 @@ def extract_sections(pdf_path: Path, book_name: str) -> list[Section]:
             if "lines" in block
             for line in block["lines"]
             for span in line["spans"]
-            if span["text"].strip()
         ]
+
         body_size = statistics.median(font_sizes) if font_sizes else 12
         sections = []
         chapter = "Front matter"
+        chapter_number = 0  # Front matter = 0
         heading = "Front matter"
         body: list[tuple[int, str]] = []
         section_start = 1
-        section_end = 1
-        in_contents = False
 
         def save_section():
             page_parts = {}
@@ -55,6 +57,7 @@ def extract_sections(pdf_path: Path, book_name: str) -> list[Section]:
                     text=text,
                     book=book_name,
                     chapter=chapter,
+                    chapter_number=chapter_number,
                     heading=heading,
                     page_start=section_start,
                     page_end=section_end,
@@ -79,34 +82,40 @@ def extract_sections(pdf_path: Path, book_name: str) -> list[Section]:
             for block in page["blocks"]:
                 if "lines" not in block:
                     continue
-                lines = []
+
+                heading_texts = []
+                body_lines = []
+                in_heading = False
+
                 for line in block["lines"]:
-                    spans = [span for span in line["spans"] if span["text"].strip()]
-                    text = " ".join(span["text"].strip() for span in spans).strip()
-                    if not text:
+                    spans = line["spans"]
+                    if not spans:
                         continue
 
-                    largest_font = max(span["size"] for span in spans)
-                    letters = re.sub(r"[^A-Za-z]", "", text)
-                    uppercase_heading = (
-                        len(text) <= 100
-                        and len(letters) >= 3
-                        and letters == letters.upper()
-                    )
-                    is_heading = largest_font >= body_size * 1.2 or uppercase_heading
+                    text = "".join(span["text"] for span in spans)
+                    font_size = spans[0]["size"]
 
-                    if is_heading:
+                    is_heading = (
+                        font_size > body_size
+                        or text.upper() == text
+                        and len(text) < 100
+                    )
+
+                    if is_heading and not body:
+                        in_heading = True
+                        heading_texts.append(text)
+                        continue
+
+                    if in_heading:
                         if (
                             not body
                             and section_start == page_number
                             and heading != "Front matter"
                         ):
-                            heading = f"{heading} {text}".strip()
-                            continue
+                            pass
                         save_section()
                         body.clear()
                         section_start = page_number
-                        section_end = page_number
                         heading = text
                         chapter_match = re.match(
                             r"C\s*H\s*A\s*P\s*T\s*E\s*R\s+(\d+)\b.*",
@@ -115,15 +124,22 @@ def extract_sections(pdf_path: Path, book_name: str) -> list[Section]:
                         )
                         if chapter_match:
                             chapter = f"Chapter {chapter_match.group(1)}"
+                            chapter_number = int(chapter_match.group(1))  # Extract number
                         elif heading == "Front matter" and page_number > 1:
                             chapter = "Main text"
+                            chapter_number = 1
+                        in_heading = False
                         continue
 
-                    lines.append(text)
+                    if lines:
+                        body.append((page_number, " ".join(lines)))
+                        section_end = page_number
 
-                if lines:
-                    body.append((page_number, " ".join(lines)))
-                    section_end = page_number
+                lines = []
+                for line in block["lines"]:
+                    line_text = "".join(span["text"] for span in line["spans"])
+                    if line_text.strip():
+                        lines.append(line_text)
 
         save_section()
         return sections
@@ -138,9 +154,8 @@ def make_chunks(
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        add_start_index=True,
-        separators=["\n\n", "\n", ". ", " ", ""],
     )
+
     chunks = []
     for section in sections:
         for page_number, page_text in section.page_texts:
@@ -150,6 +165,7 @@ def make_chunks(
                     {
                         "book": section.book,
                         "chapter": section.chapter,
+                        "chapter_number": section.chapter_number,  # NEW
                         "section": section.heading,
                         "page_start": page_number,
                         "page_end": page_number,
