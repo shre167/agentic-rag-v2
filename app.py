@@ -14,65 +14,56 @@ st.set_page_config(
 
 
 def render_agent_activity(activity: List[Dict]):
-    with st.expander("Agent Activity"):
-        for step_number, step in enumerate(activity, start=1):
-            st.markdown(f"### Step {step_number}")
+    trace_steps = [
+        s for s in activity
+        if s.get("action") != "Agent Dynamic Reasoning & Strategy"
+    ]
+    if not trace_steps:
+        return
 
-            if step.get("action"):
-                st.markdown(f"**Action:** {step['action']}")
+    with st.expander("⚙️ Tool Execution Trace", expanded=False):
+        for step_number, step in enumerate(trace_steps, start=1):
+            tool_name = step.get("tool")
+            action = step.get("action")
 
-            elif step.get("tool"):
-                st.markdown(f"**Tool:** `{step['tool']}`")
+            st.markdown(f"---\n### Step {step_number}: `{tool_name or action}`")
+
+            # Per-tool LLM reasoning (the LLM's thought before calling this tool).
+            tool_reasoning = step.get("tool_reasoning")
+            if tool_reasoning:
+                st.info(f"💭 **Why this tool was called:** {tool_reasoning}")
+
+            # Show routing map if list_books returned one.
+            routing_map = step.get("routing_map")
+            if routing_map and isinstance(routing_map, dict):
+                st.markdown("**Discovered knowledge bases:**")
+                for kb, title in routing_map.items():
+                    st.markdown(f"  - `{kb}` → *{title}*")
 
             action_input = step.get("input")
             if action_input:
-                st.markdown(f"**Input:** {action_input}")
+                st.markdown(f"**Input:** `{action_input}`")
 
             outcome = step.get("result", "Completed")
-            tool_name = step.get("tool")
-
-            if (
-                tool_name == "list_book_structure"
-                and outcome.startswith("Found ")
-            ):
-                outcome = (
-                    f"Retrieved book structure "
-                    f"({outcome.removeprefix('Found ')})"
-                )
-
-            elif tool_name in {
-                "chapter_search",
-                "section_search",
-                "page_search",
-                "semantic_search",
-            }:
-                outcome = outcome.replace(
-                    " passages",
-                    " supporting passages",
-                )
+            if tool_name in {"semantic_search", "chapter_search", "section_search", "page_search"}:
+                outcome = outcome.replace(" passages", " supporting passages")
 
             st.markdown(f"**Outcome:** {outcome}")
 
-            citation_status = step.get("citation_status")
+            matches = step.get("matches")
+            if matches is not None and tool_name == "semantic_search":
+                st.markdown(f"**Chunks retrieved:** {matches}")
 
+            citation_status = step.get("citation_status")
             if citation_status == "validated":
                 st.success(
                     f"Citation validation passed: "
-                    f"{step.get('validated_citations', 0)} "
-                    f"citation(s) verified."
+                    f"{step.get('validated_citations', 0)} citation(s) verified."
                 )
-
             elif citation_status == "rejected":
-                st.error(
-                    "Citation validation failed. "
-                    "Unsupported citations were rejected."
-                )
-
+                st.error("Citation validation failed. Unsupported citations were rejected.")
             elif citation_status == "not_required":
-                st.info(
-                    "Citation validation not required "
-                    "for this answer."
-                )
+                st.info("Citation validation not required for this answer.")
 
 
 # --------------------------------------------------
@@ -94,31 +85,47 @@ if not knowledge_bases:
 
 
 # --------------------------------------------------
-# Sidebar
+# Sidebar: Dynamic Knowledge Bases & Viewer
 # --------------------------------------------------
 
 with st.sidebar:
-    selected_kb = st.selectbox(
-        "Knowledge Base",
+    st.title("📚 Multi-Source Knowledge Bases")
+
+    st.success(
+        "✅ The agent autonomously decides which books to search. "
+        "No manual selection needed — it reasons dynamically from your question."
+    )
+
+    kb_info = {}
+    for kb in knowledge_bases:
+        col = get_collection(kb)
+        count = col.count()
+        sample = col.get(limit=1, include=["metadatas"])["metadatas"]
+        title = sample[0].get("book", "Unknown") if sample else "Unknown"
+        kb_info[kb] = (title, count)
+
+    total_chunks = sum(c for _, c in kb_info.values())
+    st.metric("Total Indexed Chunks", total_chunks)
+
+    st.markdown("### Indexed Books")
+    for kb, (title, count) in kb_info.items():
+        st.markdown(f"- **`{kb}`** → *{title}* ({count} chunks)")
+
+    st.divider()
+
+    st.markdown("### 🔍 Chunk Inspector *(read-only — does NOT affect agent)*")
+    st.caption("Browse raw chunks stored in a collection. This selector has no effect on how the agent searches.")
+
+    viewer_kb = st.selectbox(
+        "Browse collection:",
         options=knowledge_bases,
         index=0,
+        key="viewer_kb",
     )
 
-collection = get_collection(selected_kb)
-
-with st.sidebar:
-    st.title("📚 Agentic Book Chat")
-    st.caption(f"Knowledge Base: {selected_kb}")
-
-    st.metric(
-        "Indexed Chunks",
-        collection.count(),
-    )
-
-    with st.expander("Browse Indexed Chunks"):
-        stored = collection.get(
-            include=["documents", "metadatas"]
-        )
+    with st.expander("Show chunks"):
+        viewer_col = get_collection(viewer_kb)
+        stored = viewer_col.get(include=["documents", "metadatas"])
 
         if stored["ids"]:
             rows = sorted(
@@ -130,108 +137,52 @@ with st.sidebar:
                 key=lambda row: row[0],
             )
 
-            books = sorted(
-                {
-                    metadata.get("book", "Unknown")
-                    for _, _, metadata in rows
-                }
-            )
-
-            selected_book = st.selectbox(
-                "Book",
-                ["All Books", *books],
-                key="chunk_book",
-            )
+            books = sorted({m.get("book", "Unknown") for _, _, m in rows})
+            selected_book = st.selectbox("Book Filter", ["All Books", *books], key="chunk_book")
 
             if selected_book != "All Books":
-                rows = [
-                    row
-                    for row in rows
-                    if row[2].get("book") == selected_book
-                ]
+                rows = [r for r in rows if r[2].get("book") == selected_book]
 
-            sections = sorted(
-                {
-                    metadata.get("section", "Unknown")
-                    for _, _, metadata in rows
-                }
-            )
-
-            selected_section = st.selectbox(
-                "Section",
-                ["All Sections", *sections],
-                key="chunk_section",
-            )
+            sections = sorted({m.get("section", "Unknown") for _, _, m in rows})
+            selected_section = st.selectbox("Section Filter", ["All Sections", *sections], key="chunk_section")
 
             if selected_section != "All Sections":
-                rows = [
-                    row
-                    for row in rows
-                    if row[2].get("section") == selected_section
-                ]
+                rows = [r for r in rows if r[2].get("section") == selected_section]
 
             page_size = 5
-
-            page_count = max(
-                1,
-                (len(rows) + page_size - 1) // page_size,
-            )
-
-            page_number = st.number_input(
-                "Chunk Page",
-                min_value=1,
-                max_value=page_count,
-                value=1,
-            )
-
+            page_count = max(1, (len(rows) + page_size - 1) // page_size)
+            page_number = st.number_input("Page", min_value=1, max_value=page_count, value=1)
             start = (page_number - 1) * page_size
 
-            for (
-                chunk_id,
-                text,
-                metadata,
-            ) in rows[start : start + page_size]:
-
+            for chunk_id, text, metadata in rows[start : start + page_size]:
                 lines_str = (
                     f" | ll. {metadata.get('line_start', '?')}-{metadata.get('line_end', '?')}"
                     if "line_start" in metadata
                     else ""
                 )
-                title = (
-                    f"{chunk_id} | "
-                    f"pp. {metadata.get('page_start', '?')}-"
-                    f"{metadata.get('page_end', '?')}"
-                    f"{lines_str}"
-                )
+                title = f"{chunk_id} | pp. {metadata.get('page_start', '?')}-{metadata.get('page_end', '?')}{lines_str}"
 
                 with st.expander(title):
-                    st.markdown(
-                        f"**{metadata.get('section', 'Unknown')}**"
-                    )
-
+                    st.markdown(f"**{metadata.get('section', 'Unknown')}**")
                     lines_caption = (
                         f" | Lines: {metadata.get('line_start', '?')}-{metadata.get('line_end', '?')}"
                         if "line_start" in metadata
                         else ""
                     )
-                    st.caption(
-                        f"Chapter: {metadata.get('chapter', 'Unknown')}{lines_caption}"
-                    )
-
+                    st.caption(f"Chapter: {metadata.get('chapter', 'Unknown')}{lines_caption}")
                     st.write(text)
         else:
-            st.info("No chunks available.")
+            st.info("No chunks available in this collection.")
 
 
 # --------------------------------------------------
-# Main UI
+# Main Chat UI
 # --------------------------------------------------
 
-st.title("📚 Agentic Book Chat")
-
+st.title("📚 Autonomous Agentic Book Chat")
 st.caption(
-    "Ask questions about the selected knowledge base. "
-    "Answers include supporting citations with chapter, section, page, and line metadata."
+    "Ask any question about indexed books, chapters, sections, pages, or lines. "
+    "The agent dynamically decides which collections to search, reasons about its strategy, and synthesizes answers with citations."
 )
 
 if "messages" not in st.session_state:
@@ -242,11 +193,15 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+        if message.get("reasoning"):
+            with st.expander("🧠 Agent Dynamic Reasoning & Strategy", expanded=True):
+                st.markdown(message["reasoning"])
+
         if message.get("activity"):
             render_agent_activity(message["activity"])
 
         if message.get("sources"):
-            with st.expander("Sources"):
+            with st.expander("📚 Retrieved Sources & Citations"):
                 for source in message["sources"]:
                     lines_info = (
                         f", lines {source['line_start']}-{source['line_end']}"
@@ -254,25 +209,22 @@ for message in st.session_state.messages:
                         else ""
                     )
                     st.markdown(
-                        f"**[{source['id']}] "
-                        f"{source['section']}** "
-                        f"(Chapter {source['chapter']}, "
-                        f"pages {source['page_start']}-"
-                        f"{source['page_end']}{lines_info})"
+                        f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
+                        f"(Chapter {source['chapter']}, pages {source['page_start']}-{source['page_end']}{lines_info})"
                     )
-
                     st.write(source["text"])
 
 
 if not st.session_state.messages:
     st.info(
-        "Ask a question about the book to start a conversation."
+        "Ask a question to start. Examples:\n"
+        "- *'Compare focus and distraction in Mind Management and Deep Work'* (Searches multiple collections)\n"
+        "- *'What does line 12 of page 10 say in Mind Management?'* (Line & page metadata search)\n"
+        "- *'What are the key ideas in Deep Work chapter 1?'* (Chapter metadata search)"
     )
 
 
-question = st.chat_input(
-    "Ask a question about the selected knowledge base..."
-)
+question = st.chat_input("Ask a question across all books...")
 
 if question:
     st.session_state.messages.append(
@@ -295,20 +247,36 @@ if question:
 
     try:
         with st.chat_message("assistant"):
-            with st.spinner("Searching knowledge base..."):
-                answer, sources, activity = answer_with_agent(
+            with st.spinner("Agent analyzing query, dynamically choosing collections, and retrieving chunks..."):
+                result = answer_with_agent(
                     question,
                     history=history,
-                    kb_name=selected_kb,
+                    kb_name=None,  # No hardcoding - agent dynamically decides
                 )
 
+            answer = result[0]
+            sources = result[1]
+            activity = result[2]
+            reasoning = getattr(result, "reasoning", None)
+
+            # If reasoning not on attribute, check activity
+            if not reasoning:
+                for step in activity:
+                    if step.get("reasoning"):
+                        reasoning = step["reasoning"]
+                        break
+
             st.markdown(answer)
+
+            if reasoning:
+                with st.expander("🧠 Agent Dynamic Reasoning & Strategy", expanded=True):
+                    st.markdown(reasoning)
 
             if activity:
                 render_agent_activity(activity)
 
             if sources:
-                with st.expander("Sources"):
+                with st.expander("📚 Retrieved Sources & Citations"):
                     for source in sources:
                         lines_info = (
                             f", lines {source['line_start']}-{source['line_end']}"
@@ -316,13 +284,9 @@ if question:
                             else ""
                         )
                         st.markdown(
-                            f"**[{source['id']}] "
-                            f"{source['section']}** "
-                            f"(Chapter {source['chapter']}, "
-                            f"pages {source['page_start']}-"
-                            f"{source['page_end']}{lines_info})"
+                            f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
+                            f"(Chapter {source['chapter']}, pages {source['page_start']}-{source['page_end']}{lines_info})"
                         )
-
                         st.write(source["text"])
 
         st.session_state.messages.append(
@@ -331,20 +295,17 @@ if question:
                 "content": answer,
                 "sources": sources,
                 "activity": activity,
+                "reasoning": reasoning,
             }
         )
 
     except Exception as error:
-        error_message = (
-            f"Could not answer this question: {error}"
-        )
-
+        error_message = f"Could not answer this question: {error}"
         st.session_state.messages.append(
             {
                 "role": "assistant",
                 "content": error_message,
             }
         )
-
         with st.chat_message("assistant"):
             st.error(error_message)

@@ -173,10 +173,34 @@ def answer_with_agent(
     passages_by_id = {}
     calculator_used = False
 
-    # Collect tool activity and retrieved passages.
-    for message in result["messages"]:
+    # Walk the full message sequence in order.
+    # AI messages with tool_calls contain the LLM's reasoning for WHY it chose each tool.
+    # Tool messages immediately follow and contain the tool output.
+    # We pair them: for each tool message, the most-recent preceding AI thought is its "why".
+    pending_tool_thoughts: dict[str, str] = {}  # tool_call_id -> LLM thought text
 
-        if getattr(message, "type", None) != "tool":
+    for message in result["messages"]:
+        msg_type = getattr(message, "type", None)
+
+        # Capture LLM thoughts before tool calls.
+        if msg_type == "ai" and getattr(message, "tool_calls", None):
+            thought = ""
+            content = getattr(message, "content", "")
+            if isinstance(content, str) and content.strip():
+                thought = content.strip()
+            elif isinstance(content, list):
+                thought = " ".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ).strip()
+
+            for tc in message.tool_calls:
+                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                pending_tool_thoughts[tc_id] = thought
+            continue
+
+        if msg_type != "tool":
             continue
 
         payload = _tool_payload(message)
@@ -184,12 +208,18 @@ def answer_with_agent(
         if not payload:
             continue
 
+        # Retrieve the LLM thought that triggered this tool call.
+        tool_call_id = getattr(message, "tool_call_id", "") or ""
+        thought_for_this_call = pending_tool_thoughts.pop(tool_call_id, "")
+
         activity.append(
             {
                 "tool": payload.get("tool", "tool"),
                 "input": payload.get("input", ""),
                 "result": payload.get("result", ""),
                 "matches": len(payload.get("passages", [])),
+                "routing_map": payload.get("routing_map"),
+                "tool_reasoning": thought_for_this_call or None,
             }
         )
 
