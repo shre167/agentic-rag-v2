@@ -15,8 +15,13 @@ while True:
             f"{step.get('input', '')} -> {step.get('result', '')}"
         )
     for rank, source in enumerate(sources, start=1):
+        line_info = (
+            f", lines {source['line_start']}-{source['line_end']}"
+            if "line_start" in source
+            else ""
+        )
         print(
             f"\n[Source {rank}] {source['section']} "
-            f"(pages {source['page_start']}-{source['page_end']}, "
+            f"(pages {source['page_start']}-{source['page_end']}{line_info}, "
             f"distance {source['distance']:.3f})"
         )

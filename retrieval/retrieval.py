@@ -1,4 +1,5 @@
 import re
+from typing import Dict, Any, List
 
 from .reranking import rerank_passages
 from .vector_store import get_collection
@@ -8,6 +9,29 @@ MAX_DISTANCE = 0.65
 NO_SOURCE_ANSWER = (
     "I couldn't find relevant information in the selected knowledge base."
 )
+
+_METADATA_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_metadata_index(collection, kb_name: str) -> Dict[str, Any]:
+    if kb_name not in _METADATA_CACHE:
+        stored = collection.get(include=["metadatas"])
+        metas = stored.get("metadatas", [])
+        books = sorted({m.get("book", "") for m in metas if m.get("book")})
+        chapters = sorted({m.get("chapter", "") for m in metas if m.get("chapter")})
+        sections = sorted({m.get("section", "") for m in metas if m.get("section")})
+        chapter_numbers = {
+            str(m.get("chapter_number")): m.get("chapter", "")
+            for m in metas
+            if m.get("chapter_number") is not None and m.get("chapter")
+        }
+        _METADATA_CACHE[kb_name] = {
+            "books": books,
+            "chapters": chapters,
+            "sections": sections,
+            "chapter_numbers": chapter_numbers,
+        }
+    return _METADATA_CACHE[kb_name]
 
 
 def retrieve_chunks(
@@ -19,18 +43,19 @@ def retrieve_chunks(
     chapter: str | None = None,
     section: str | None = None,
     page: int | None = None,
+    line: int | None = None,
 ) -> list[dict]:
     """
     Retrieve passages from a specific knowledge base.
-    Supports optional chapter, section and page filtering.
+    Optimized for sub-second latency with cached metadata indexing and fast-path lookups.
     """
 
     collection = get_collection(kb_name)
 
-    if collection.count() == 0:
+    total_count = collection.count()
+    if total_count == 0:
         return []
 
-    stored = None
     where_conditions = []
     where = None
 
@@ -38,88 +63,88 @@ def retrieve_chunks(
     chapter = chapter.strip() if chapter else None
     section = section.strip() if section else None
 
-    if book or chapter or section or page is not None:
-        stored = collection.get(include=["metadatas"])
+    # Only inspect metadata index if book, chapter, or section needs resolving
+    if book or chapter or section:
+        meta_index = _get_metadata_index(collection, kb_name)
 
-    if book and stored:
-        canonical_book = next(
-            (
-                metadata.get("book", "")
-                for metadata in stored["metadatas"]
-                if metadata.get("book", "").casefold() == book.casefold()
-            ),
-            None,
-        )
-        if canonical_book is None:
-            partial_matches = sorted(
-                {
-                    metadata.get("book", "")
-                    for metadata in stored["metadatas"]
-                    if book.casefold() in metadata.get("book", "").casefold()
-                }
+        if book:
+            canonical_book = next(
+                (b for b in meta_index["books"] if b.casefold() == book.casefold()),
+                None,
             )
-            if len(partial_matches) != 1:
+            if canonical_book is None:
+                partial_matches = sorted(
+                    {b for b in meta_index["books"] if book.casefold() in b.casefold()}
+                )
+                if len(partial_matches) == 1:
+                    canonical_book = partial_matches[0]
+            if canonical_book is None:
                 return []
-            canonical_book = partial_matches[0]
-        where_conditions.append({"book": {"$eq": canonical_book}})
+            where_conditions.append({"book": {"$eq": canonical_book}})
 
-    # Chapter filter
-    if chapter and stored:
-        requested_number = re.search(
-            r"\bchapter\s*(\d+)\b",
-            chapter,
-            re.IGNORECASE,
-        )
-
-        canonical_chapter = next(
-            (
-                metadata.get("chapter", "")
-                for metadata in stored["metadatas"]
-                if (
-                    metadata.get("chapter", "").casefold()
-                    == chapter.casefold()
-                    or (
-                        requested_number
-                        and (
-                            match := re.search(
-                                r"\bchapter\s*(\d+)\b",
-                                metadata.get("chapter", ""),
-                                re.IGNORECASE,
+        if chapter:
+            requested_number = re.search(
+                r"\b(?:chapter\s*)?(\d+)\b",
+                chapter,
+                re.IGNORECASE,
+            )
+            canonical_chapter = next(
+                (
+                    c
+                    for c in meta_index["chapters"]
+                    if (
+                        c.casefold() == chapter.casefold()
+                        or (
+                            requested_number
+                            and (
+                                (
+                                    match := re.search(
+                                        r"\b(?:chapter\s*)?(\d+)\b",
+                                        c,
+                                        re.IGNORECASE,
+                                    )
+                                )
+                                and match.group(1) == requested_number.group(1)
                             )
                         )
-                        and match.group(1)
-                        == requested_number.group(1)
                     )
+                ),
+                None,
+            )
+            if canonical_chapter is None and requested_number:
+                canonical_chapter = meta_index["chapter_numbers"].get(
+                    requested_number.group(1)
                 )
-            ),
-            None,
-        )
 
-        if canonical_chapter is None:
-            return []
+            if canonical_chapter is None:
+                return []
 
-        where_conditions.append(
-            {"chapter": {"$eq": canonical_chapter}}
-        )
+            where_conditions.append({"chapter": {"$eq": canonical_chapter}})
 
-    # Section filter
-    if section and stored:
-        canonical_section = next(
-            (
-                metadata.get("section", "")
-                for metadata in stored["metadatas"]
-                if metadata.get("section", "").casefold()
-                == section.casefold()
-            ),
-            None,
-        )
+        if section:
+            canonical_section = next(
+                (
+                    s
+                    for s in meta_index["sections"]
+                    if s.casefold() == section.casefold()
+                ),
+                None,
+            )
+            if canonical_section is None:
+                partial_sections = sorted(
+                    {
+                        s
+                        for s in meta_index["sections"]
+                        if section.casefold() in s.casefold()
+                    }
+                )
+                if len(partial_sections) == 1:
+                    canonical_section = partial_sections[0]
 
-        if canonical_section is None:
-            return []
+            if canonical_section is None:
+                return []
 
-        where_conditions.append(
-            {"section": {"$eq": canonical_section}}
-        )
+            where_conditions.append({"section": {"$eq": canonical_section}})
 
     # Page filter
     if page is not None:
@@ -130,6 +155,15 @@ def retrieve_chunks(
             ]
         )
 
+    # Line filter
+    if line is not None:
+        where_conditions.extend(
+            [
+                {"line_start": {"$lte": line}},
+                {"line_end": {"$gte": line}},
+            ]
+        )
+
     if where_conditions:
         where = (
             where_conditions[0]
@@ -137,19 +171,43 @@ def retrieve_chunks(
             else {"$and": where_conditions}
         )
 
-    scoped_count = (
-        len(collection.get(where=where, include=[])["ids"])
-        if where
-        else collection.count()
+    # Fast path: direct retrieval when query is a lookup for page/line/structure
+    is_direct_lookup = bool(
+        where
+        and (
+            not query.strip()
+            or re.search(
+                r"^\s*(what('?s| is)? (on|in|at) )?(page|line|chapter|section)\s*\d+.*\??\s*$",
+                query.strip(),
+                re.IGNORECASE,
+            )
+        )
     )
 
-    if scoped_count == 0:
-        return []
+    if is_direct_lookup:
+        lookup_res = collection.get(
+            where=where,
+            include=["documents", "metadatas"],
+            limit=k * 2,
+        )
+        if lookup_res["ids"]:
+            passages = [
+                {
+                    "id": chunk_id,
+                    "text": text,
+                    **metadata,
+                    "distance": 0.0,
+                }
+                for chunk_id, text, metadata in zip(
+                    lookup_res["ids"],
+                    lookup_res["documents"],
+                    lookup_res["metadatas"],
+                )
+            ]
+            return passages[:k]
 
-    candidate_count = min(
-        scoped_count,
-        max(k * 4, 20),
-    )
+    # Semantic search with where filter
+    candidate_count = min(total_count, max(k * 4, 15))
 
     results = collection.query(
         query_texts=[query],
@@ -183,7 +241,7 @@ def retrieve_chunks(
         if passage["distance"] <= max_distance
     ]
 
-    # Fallback if strict semantic filtering returns nothing
+    # Fallback if strict semantic distance returned nothing
     if not relevant and where:
         fallback = collection.get(
             where=where,
@@ -191,7 +249,7 @@ def retrieve_chunks(
                 "documents",
                 "metadatas",
             ],
-            limit=max(k * 4, 20),
+            limit=max(k * 4, 15),
         )
 
         relevant = [

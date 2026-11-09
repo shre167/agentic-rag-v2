@@ -51,15 +51,6 @@ def render_agent_activity(activity: List[Dict]):
                     " supporting passages",
                 )
 
-            elif (
-                tool_name == "calculator"
-                and outcome.startswith("Result:")
-            ):
-                outcome = (
-                    f"Calculation complete: "
-                    f"{outcome.removeprefix('Result:').strip()}"
-                )
-
             st.markdown(f"**Outcome:** {outcome}")
 
             citation_status = step.get("citation_status")
@@ -201,10 +192,16 @@ with st.sidebar:
                 metadata,
             ) in rows[start : start + page_size]:
 
+                lines_str = (
+                    f" | ll. {metadata.get('line_start', '?')}-{metadata.get('line_end', '?')}"
+                    if "line_start" in metadata
+                    else ""
+                )
                 title = (
                     f"{chunk_id} | "
                     f"pp. {metadata.get('page_start', '?')}-"
                     f"{metadata.get('page_end', '?')}"
+                    f"{lines_str}"
                 )
 
                 with st.expander(title):
@@ -212,9 +209,13 @@ with st.sidebar:
                         f"**{metadata.get('section', 'Unknown')}**"
                     )
 
+                    lines_caption = (
+                        f" | Lines: {metadata.get('line_start', '?')}-{metadata.get('line_end', '?')}"
+                        if "line_start" in metadata
+                        else ""
+                    )
                     st.caption(
-                        f"Chapter: "
-                        f"{metadata.get('chapter', 'Unknown')}"
+                        f"Chapter: {metadata.get('chapter', 'Unknown')}{lines_caption}"
                     )
 
                     st.write(text)
@@ -230,7 +231,7 @@ st.title("📚 Agentic Book Chat")
 
 st.caption(
     "Ask questions about the selected knowledge base. "
-    "Answers include supporting citations."
+    "Answers include supporting citations with chapter, section, page, and line metadata."
 )
 
 if "messages" not in st.session_state:
@@ -247,12 +248,17 @@ for message in st.session_state.messages:
         if message.get("sources"):
             with st.expander("Sources"):
                 for source in message["sources"]:
+                    lines_info = (
+                        f", lines {source['line_start']}-{source['line_end']}"
+                        if "line_start" in source
+                        else ""
+                    )
                     st.markdown(
                         f"**[{source['id']}] "
                         f"{source['section']}** "
                         f"(Chapter {source['chapter']}, "
                         f"pages {source['page_start']}-"
-                        f"{source['page_end']})"
+                        f"{source['page_end']}{lines_info})"
                     )
 
                     st.write(source["text"])
@@ -304,12 +310,17 @@ if question:
             if sources:
                 with st.expander("Sources"):
                     for source in sources:
+                        lines_info = (
+                            f", lines {source['line_start']}-{source['line_end']}"
+                            if "line_start" in source
+                            else ""
+                        )
                         st.markdown(
                             f"**[{source['id']}] "
                             f"{source['section']}** "
                             f"(Chapter {source['chapter']}, "
                             f"pages {source['page_start']}-"
-                            f"{source['page_end']})"
+                            f"{source['page_end']}{lines_info})"
                         )
 
                         st.write(source["text"])

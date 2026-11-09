@@ -88,6 +88,11 @@ def main():
             f"Pages     : "
             f"{metadata['page_start']} - {metadata['page_end']}"
         )
+        if "line_start" in metadata:
+            print(
+                f"Lines     : "
+                f"{metadata['line_start']} - {metadata['line_end']}"
+            )
 
         print("\nText Preview:")
         print(text[:500])

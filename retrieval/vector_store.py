@@ -1,18 +1,30 @@
 import hashlib
 from pathlib import Path
+from typing import Dict, Any
 
 import chromadb
 
 from settings import DB_PATH
 
+_CLIENT = None
+_COLLECTIONS: Dict[str, Any] = {}
+
+
+def _get_client():
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = chromadb.PersistentClient(path=str(DB_PATH))
+    return _CLIENT
+
 
 def get_collection(kb_name: str):
-    client = chromadb.PersistentClient(path=str(DB_PATH))
-
-    return client.get_or_create_collection(
-        name=kb_name,
-        metadata={"hnsw:space": "cosine"},
-    )
+    if kb_name not in _COLLECTIONS:
+        client = _get_client()
+        _COLLECTIONS[kb_name] = client.get_or_create_collection(
+            name=kb_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+    return _COLLECTIONS[kb_name]
 
 
 def index_chunks(
@@ -77,10 +89,7 @@ def get_chunks(kb_name: str):
 
 
 def list_knowledge_bases():
-    client = chromadb.PersistentClient(
-        path=str(DB_PATH)
-    )
-
+    client = _get_client()
     collections = client.list_collections()
 
     return sorted(
