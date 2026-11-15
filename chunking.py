@@ -113,7 +113,18 @@ def extract_sections(pdf_path: Path, book_name: str) -> list[Section]:
                         and len(letters) >= 3
                         and letters == letters.upper()
                     )
-                    is_heading = largest_font >= body_size * 1.2 or uppercase_heading
+                    chap_keyword_match = bool(
+                        re.match(
+                            r"^(?:C\s*H\s*A\s*P\s*T\s*E\s*R|Rule|Part|Section|Book|Principle|Step)\s+(?:#\s*)?(\w+)\b",
+                            text,
+                            re.IGNORECASE,
+                        )
+                        or text.strip().lower() in {
+                            "introduction", "preface", "prologue", "foreword",
+                            "conclusion", "epilogue", "afterword", "appendix"
+                        }
+                    )
+                    is_heading = largest_font >= body_size * 1.12 or uppercase_heading or chap_keyword_match
 
                     if is_heading:
                         if (
@@ -130,14 +141,43 @@ def extract_sections(pdf_path: Path, book_name: str) -> list[Section]:
                         section_end = page_number
                         heading = text
 
-                        chapter_match = re.match(
-                            r"C\s*H\s*A\s*P\s*T\s*E\s*R\s+(\d+)\b.*",
+                        WORD_NUMS = {
+                            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                            "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+                            "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+                            "nineteen": 19, "twenty": 20,
+                            "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5,
+                            "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10,
+                            "xi": 11, "xii": 12, "xiii": 13, "xiv": 14, "xv": 15,
+                        }
+                        chap_m = re.match(
+                            r"(?:C\s*H\s*A\s*P\s*T\s*E\s*R|Rule|Part|Section|Book|Principle|Step)\s+(?:#\s*)?(\w+)\b",
                             text,
                             re.IGNORECASE,
                         )
-                        if chapter_match:
-                            chapter = f"Chapter {chapter_match.group(1)}"
-                            chapter_number = int(chapter_match.group(1))
+                        if chap_m:
+                            val = chap_m.group(1).lower()
+                            num = WORD_NUMS.get(val, int(val) if val.isdigit() else 1)
+                            raw_match = chap_m.group(0).lower()
+                            if "rule" in raw_match:
+                                prefix = "Rule"
+                            elif "part" in raw_match:
+                                prefix = "Part"
+                            elif "principle" in raw_match:
+                                prefix = "Principle"
+                            elif "step" in raw_match:
+                                prefix = "Step"
+                            else:
+                                prefix = "Chapter"
+                            chapter = f"{prefix} {num}"
+                            chapter_number = num
+                        elif text.strip().lower() in {"introduction", "preface", "prologue", "foreword"}:
+                            chapter = text.strip().title()
+                            chapter_number = 0
+                        elif text.strip().lower() in {"conclusion", "epilogue", "afterword", "appendix"}:
+                            chapter = text.strip().title()
+                            chapter_number = 999
                         elif heading == "Front matter" and page_number > 1:
                             chapter = "Main text"
                             chapter_number = 1

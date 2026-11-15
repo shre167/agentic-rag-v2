@@ -81,7 +81,7 @@ fake_response = json.dumps({
     "answer": f"Focus is discussed extensively [{sample_id}].",
     "sources": [sample_id]
 })
-answer, source_ids, valid, reasoning = validate_citations(fake_response, retrieved_ids)
+answer, source_ids, valid, reasoning, atype = validate_citations(fake_response, retrieved_ids)
 print(f"Answer: {answer[:60]}...")
 print(f"Sources: {source_ids}")
 print(f"Valid: {valid}")

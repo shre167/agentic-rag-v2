@@ -94,7 +94,7 @@ fake_llm_response = json.dumps({
     "sources": [id_kb1, id_kb2]
 })
 
-answer, source_ids, valid, reasoning = validate_citations(
+answer, source_ids, valid, reasoning, atype = validate_citations(
     fake_llm_response,
     set(all_passages.keys()),
 )

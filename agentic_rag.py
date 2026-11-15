@@ -77,32 +77,39 @@ def validate_citations(
         end = content.rfind("}")
 
         if start < 0 or end <= start:
+            if not retrieved_ids:
+                return content.strip(), [], True, None, "general"
             return NO_SOURCE_ANSWER, [], False, None, "general"
 
         try:
             payload = json.loads(content[start : end + 1])
         except json.JSONDecodeError:
+            if not retrieved_ids:
+                return content.strip(), [], True, None, "general"
             return NO_SOURCE_ANSWER, [], False, None, "general"
 
     if not isinstance(payload, dict):
+        if not retrieved_ids:
+            return content.strip(), [], True, None, "general"
         return NO_SOURCE_ANSWER, [], False, None, "general"
 
     answer = payload.get("answer")
-    source_ids = payload.get("sources")
+    source_ids = payload.get("sources", [])
     reasoning = payload.get("reasoning")
     answer_type = payload.get("answer_type", "book")
 
     if not isinstance(reasoning, str):
         reasoning = None
     if answer_type not in {"book", "web", "general", "mixed"}:
-        answer_type = "book"
+        answer_type = "general" if not retrieved_ids else "book"
 
-    if (
-        not isinstance(answer, str)
-        or not isinstance(source_ids, list)
-        or any(not isinstance(source_id, str) for source_id in source_ids)
-    ):
+    if not isinstance(answer, str):
+        if not retrieved_ids:
+            return content.strip(), [], True, reasoning, "general"
         return NO_SOURCE_ANSWER, [], False, reasoning, answer_type
+
+    if not isinstance(source_ids, list):
+        source_ids = []
 
     # Remove duplicate source IDs.
     source_ids = list(dict.fromkeys(source_ids))
@@ -195,7 +202,12 @@ def answer_with_agent(
     ]
 
     # Execute agent.
-    result = agent.invoke({"messages": messages})
+    try:
+        result = agent.invoke({"messages": messages})
+    except Exception as e:
+        err = str(e)
+        activity = [{"action": "Agent error", "result": err, "citation_status": "rejected"}]
+        return AgentResult(NO_SOURCE_ANSWER, [], activity, None, "general")
 
     activity = []
     passages_by_id = {}
@@ -254,50 +266,23 @@ def answer_with_agent(
             if kb_match:
                 kb_param = kb_match.group(1)
 
-        # Synthesize clear 'why_called' reasoning if LLM thought was empty.
+        # Genuine LLM thought for why this tool was called (not hardcoded).
         why_called = thought_for_this_call
+        if not why_called:
+            if tool_name == "list_books":
+                why_called = "Discover available indexed books and their knowledge base mappings"
+            elif tool_name == "semantic_search":
+                why_called = f"Search passages in '{kb_param or 'selected collection'}' for relevant context"
+            elif tool_name == "web_search":
+                why_called = "Search external web sources for current or non-book information"
+            else:
+                why_called = f"Execute {tool_name}"
+
         why_repeated = None
         why_web_instead_of_semantic = None
 
-        if tool_name == "list_books":
-            if not why_called:
-                why_called = "Discover all indexed book collections and build the routing map to match user question to knowledge bases."
-
-        elif tool_name == "semantic_search":
-            passages = payload.get("passages", [])
-            if not why_called:
-                if kb_param:
-                    why_called = f"Query collection '{kb_param}' for book passages matching the user's question."
-                else:
-                    why_called = "Search indexed book content using semantic search and metadata filters."
-
-            # Explain repeated tool calls.
-            if call_num > 1:
-                prev_semantic = [c for c in previous_calls if c["tool"] == "semantic_search"]
-                if prev_semantic:
-                    last_call = prev_semantic[-1]
-                    last_kb = last_call.get("kb_param")
-                    if last_kb and kb_param and last_kb != kb_param:
-                        why_repeated = (
-                            f"Multi-source retrieval: Step previously searched '{last_kb}'. "
-                            f"This repeated call queries '{kb_param}' so the agent can gather cross-book "
-                            f"evidence and compare perspectives across multiple books."
-                        )
-                    else:
-                        why_repeated = (
-                            f"Follow-up query: Search #{call_num} in this collection with adjusted filters/terms "
-                            f"to ensure complete coverage."
-                        )
-
-        elif tool_name == "web_search":
+        if tool_name == "web_search":
             web_search_used = True
-            if not why_called:
-                why_called = f"Search live web for external topic '{raw_input}'."
-            why_web_instead_of_semantic = (
-                "The topic is outside the scope of the indexed books ('Mind Management' & 'Deep Work'). "
-                "Web search was chosen instead of book semantic search to retrieve accurate live facts "
-                "and prevent hallucinating non-existent book passages."
-            )
 
         # Build detailed 'what_found' summary.
         what_found_items = []
@@ -346,6 +331,7 @@ def answer_with_agent(
             "tool_reasoning": why_called,
             "why_repeated": why_repeated,
             "why_web_instead_of_semantic": why_web_instead_of_semantic,
+            "latency_ms": payload.get("latency_ms"),
         }
 
         previous_calls.append(activity_step)

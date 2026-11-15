@@ -79,6 +79,18 @@ def index_chunks(
     if stale_ids:
         collection.delete(ids=stale_ids)
 
+    try:
+        from retrieval.retrieval import clear_metadata_cache
+        clear_metadata_cache()
+    except Exception:
+        pass
+
+    try:
+        from tools.list_books import clear_book_cache
+        clear_book_cache()
+    except Exception:
+        pass
+
     return len(chunks)
 
 

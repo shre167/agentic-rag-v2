@@ -80,5 +80,5 @@ while True:
                 )
                 print(
                     f"  [{source['id']}] {source.get('book', 'Book')} — {source.get('section', '')} "
-                    f"(Chapter {source.get('chapter', '')}, pages {source['page_start']}-{source['page_end']}{lines_info})"
+                    f"({source.get('chapter', '')}, pages {source['page_start']}-{source['page_end']}{lines_info})"
                 )

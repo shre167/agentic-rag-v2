@@ -18,6 +18,10 @@ MAX_DISTANCE = 0.65
 _METADATA_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
+def clear_metadata_cache():
+    _METADATA_CACHE.clear()
+
+
 def _get_metadata_index(collection, kb_name: str) -> Dict[str, Any]:
     if kb_name not in _METADATA_CACHE:
         stored = collection.get(include=["metadatas"])
@@ -100,38 +104,18 @@ def retrieve_chunks(
             where_conditions.append({"book": {"$eq": canonical_book}})
 
         if chapter:
-            requested_number = re.search(
-                r"\b(?:chapter\s*)?(\d+)\b",
-                chapter,
-                re.IGNORECASE,
-            )
             canonical_chapter = next(
-                (
-                    c
-                    for c in meta_index["chapters"]
-                    if (
-                        c.casefold() == chapter.casefold()
-                        or (
-                            requested_number
-                            and (
-                                (
-                                    match := re.search(
-                                        r"\b(?:chapter\s*)?(\d+)\b",
-                                        c,
-                                        re.IGNORECASE,
-                                    )
-                                )
-                                and match.group(1) == requested_number.group(1)
-                            )
-                        )
-                    )
-                ),
+                (c for c in meta_index["chapters"] if c.casefold() == chapter.casefold()),
                 None,
             )
-            if canonical_chapter is None and requested_number:
-                canonical_chapter = meta_index["chapter_numbers"].get(
-                    requested_number.group(1)
-                )
+            if canonical_chapter is None:
+                requested_number = re.search(r"\b(\d+)\b", chapter)
+                if requested_number:
+                    num_str = requested_number.group(1)
+                    canonical_chapter = next(
+                        (c for c in meta_index["chapters"] if re.search(rf"\b{num_str}\b", c)),
+                        meta_index["chapter_numbers"].get(num_str),
+                    )
 
             if canonical_chapter is None:
                 return []

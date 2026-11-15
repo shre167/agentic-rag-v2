@@ -1,4 +1,5 @@
 import re
+import time
 from langchain.tools import tool
 
 from retrieval.retrieval import retrieve_chunks
@@ -34,6 +35,7 @@ def semantic_search(
     Returns:
         Passages with metadata: page_start, page_end, line_start, line_end, chapter, section
     """
+    start_time = time.perf_counter()
     parsed_page: int | None = None
     if page is not None:
         if isinstance(page, int):
@@ -66,9 +68,11 @@ def semantic_search(
 
     # Auto-extract chapter from query if not explicitly passed
     if not chapter:
-        chap_match = re.search(r"\bchapter\s*(\d+)\b", query, re.IGNORECASE)
-        if chap_match:
-            chapter = f"Chapter {chap_match.group(1)}"
+        WORD_NUMS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5"}
+        match = re.search(r"\b(chapter|rule)\s+(?:#\s*)?(\d+|one|two|three|four|five)\b", query, re.IGNORECASE)
+        if match:
+            kind, val = match.group(1).title(), match.group(2).lower()
+            chapter = f"{kind} {WORD_NUMS.get(val, val)}"
 
     search_desc = f'"{query}" [kb: {kb_name}'
     if parsed_page is not None:
@@ -92,12 +96,15 @@ def semantic_search(
         line=parsed_line,
     )
 
+    latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
+
     if not passages:
         return tool_result(
             "semantic_search",
             search_desc,
             "No relevant passages found",
             [],
+            latency_ms=latency_ms,
         )
 
     return tool_result(
@@ -105,4 +112,5 @@ def semantic_search(
         search_desc,
         f"Found {len(passages)} supporting passages",
         passages,
+        latency_ms=latency_ms,
     )

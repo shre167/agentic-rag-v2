@@ -1,9 +1,12 @@
+from pathlib import Path
 from typing import List, Dict
 
 import streamlit as st
 
 from agentic_rag import answer_with_agent
+from ingest import ingest_pdf
 from retrieval.vector_store import get_collection, list_knowledge_bases
+from settings import ROOT
 
 
 st.set_page_config(
@@ -29,110 +32,43 @@ _TOOL_META = {
 
 
 def render_agent_activity(activity: List[Dict]):
-    """Render detailed tool execution trace with per-tool reasoning, repeated call explanations, and findings."""
-    trace_steps = [
-        s for s in activity
-        if s.get("action") != "Agent Dynamic Reasoning & Strategy"
-    ]
-    if not trace_steps:
+    """Render tool execution trace with tool name, latency, and reasons inline (no dropdown/expander)."""
+    tool_steps = [s for s in activity if s.get("tool")]
+    if not tool_steps:
         return
 
-    with st.expander("⚙️ Tool Execution Trace (Step-by-Step Reasons & Discoveries)", expanded=False):
-        for step_number, step in enumerate(trace_steps, start=1):
-            tool_name = step.get("tool")
-            action = step.get("action")
-            meta = _TOOL_META.get(tool_name, {"icon": "🔧", "label": tool_name or action})
+    st.caption("⚡ **Tool Execution & Latency**")
+    for step_number, step in enumerate(tool_steps, start=1):
+        tool_name = step.get("tool")
+        meta = _TOOL_META.get(tool_name, {"icon": "🔧", "label": tool_name or "Tool"})
 
-            st.markdown(f"---\n### {meta['icon']} Step {step_number} — {meta['label']}")
+        latency = step.get("latency_ms")
+        if latency is not None:
+            latency_str = f"{latency:.0f} ms" if latency < 1000 else f"{latency/1000:.2f} s"
+        else:
+            latency_str = "< 10 ms"
 
-            # 1. WHY this tool was called
-            tool_reasoning = step.get("tool_reasoning")
-            if tool_reasoning:
-                st.info(f"🎯 **Why this tool was called:**\n\n{tool_reasoning}")
+        reason = (
+            step.get("tool_reasoning")
+            or step.get("why_repeated")
+            or step.get("why_web_instead_of_semantic")
+            or step.get("found_summary")
+            or "Executed for query context"
+        )
 
-            # 2. WHY a repeated call occurred (if this tool was invoked >1 time)
-            why_repeated = step.get("why_repeated")
-            if why_repeated:
-                st.warning(f"🔁 **Why this repeated call was needed:**\n\n{why_repeated}")
-
-            # 3. WHY web search instead of semantic search (for web_search)
-            why_web = step.get("why_web_instead_of_semantic")
-            if why_web:
-                st.markdown(
-                    f"> 🌐 **Decision: Why Web Search instead of Book Search?**  \n"
-                    f"> *{why_web}*"
-                )
-
-            # 4. WHAT was sent to the tool
-            action_input = step.get("input")
-            if action_input:
-                st.markdown(f"**📤 Query Sent:** `{action_input}`")
-
-            # 5. WHAT list_books discovered (routing map)
-            routing_map = step.get("routing_map")
-            if routing_map and isinstance(routing_map, dict):
-                st.markdown("**📋 Discovered Knowledge Bases:**")
-                for kb, title in routing_map.items():
-                    st.markdown(f"&nbsp;&nbsp;• `{kb}` = *{title}*")
-
-            # 6. WHAT was found
-            found_summary = step.get("found_summary") or step.get("result", "Completed")
-            matches = step.get("matches", 0)
-
-            st.markdown(f"**📥 What was found:** {found_summary}")
-
-            what_found_items = step.get("what_found_items") or []
-            if what_found_items and tool_name == "semantic_search":
-                with st.expander(f"View {len(what_found_items)} retrieved chunk metadata (pages & lines)", expanded=False):
-                    for item in what_found_items:
-                        st.markdown(f"- {item}")
-
-            elif tool_name == "web_search":
-                web_results = step.get("web_results") or []
-                if web_results:
-                    with st.expander(f"View {len(web_results)} web search results & links", expanded=False):
-                        for r in web_results:
-                            st.markdown(
-                                f"**[{r['rank']}] [{r['title']}]({r['url']})** *(via {r.get('engine','Web')})*  \n"
-                                f"{r.get('snippet', '')}"
-                            )
-
-            # 7. Citation status
-            citation_status = step.get("citation_status")
-            answer_type_label = step.get("answer_type", "")
-            if citation_status == "validated":
-                st.success(
-                    f"✓ Citations validated: {step.get('validated_citations', 0)} "
-                    f"verified ({answer_type_label} answer)."
-                )
-            elif citation_status == "rejected":
-                st.error("✗ Citation validation failed.")
-            elif citation_status == "not_required":
-                st.info("ℹ️ No citation validation required for this answer.")
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            st.markdown(f"**{meta['icon']} {meta['label']}** (Step {step_number}) — {reason}")
+        with col2:
+            st.caption(f"⏱️ `{latency_str}`")
 
 
 
 # --------------------------------------------------
-# Load Knowledge Bases
+# Sidebar: Dynamic Knowledge Bases & Ingestion
 # --------------------------------------------------
 
 knowledge_bases = list_knowledge_bases()
-
-if not knowledge_bases:
-    st.warning("No knowledge bases are indexed yet.")
-
-    st.code(
-        '.\\.venv\\Scripts\\python.exe ingest.py '
-        '"data1\\Mind Management, Not Time Management.pdf" '
-        '--book "Mind Management" --kb kb1'
-    )
-
-    st.stop()
-
-
-# --------------------------------------------------
-# Sidebar: Dynamic Knowledge Bases & Viewer
-# --------------------------------------------------
 
 with st.sidebar:
     st.title("📚 Multi-Source Knowledge Bases")
@@ -142,83 +78,141 @@ with st.sidebar:
         "No manual selection needed — it reasons dynamically from your question."
     )
 
-    kb_info = {}
-    for kb in knowledge_bases:
-        col = get_collection(kb)
-        count = col.count()
-        sample = col.get(limit=1, include=["metadatas"])["metadatas"]
-        title = sample[0].get("book", "Unknown") if sample else "Unknown"
-        kb_info[kb] = (title, count)
+    # --- Ingestion Section ---
+    st.markdown("### 📥 Ingest Book(s)")
+    st.caption("Upload PDF book(s). Each book automatically forms its own isolated knowledge base with chapter, section, page, and line metadata.")
 
-    total_chunks = sum(c for _, c in kb_info.values())
-    st.metric("Total Indexed Chunks", total_chunks)
+    uploaded_files = st.file_uploader(
+        "Upload PDF Book(s)",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="book_uploader",
+    )
 
-    st.markdown("### Indexed Books")
-    for kb, (title, count) in kb_info.items():
-        st.markdown(f"- **`{kb}`** → *{title}* ({count} chunks)")
+    custom_name = ""
+    if uploaded_files and len(uploaded_files) == 1:
+        custom_name = st.text_input(
+            "Book Title (optional)",
+            value=Path(uploaded_files[0].name).stem.replace("_", " "),
+            help="Custom name stored in metadata (defaults to file name).",
+        )
+
+    if uploaded_files:
+        if st.button("🚀 Ingest & Index Books", type="primary", use_container_width=True):
+            upload_dir = ROOT / "uploads"
+            upload_dir.mkdir(exist_ok=True)
+
+            with st.status("Ingesting books into isolated knowledge bases...", expanded=True) as status:
+                ingested_summaries = []
+                for file_idx, uploaded_file in enumerate(uploaded_files, start=1):
+                    status.write(f"📖 Processing ({file_idx}/{len(uploaded_files)}): **{uploaded_file.name}**...")
+                    temp_path = upload_dir / uploaded_file.name
+                    with open(temp_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+
+                    b_name = custom_name if (len(uploaded_files) == 1 and custom_name) else None
+                    try:
+                        summary = ingest_pdf(
+                            pdf_path=temp_path,
+                            book_name=b_name,
+                        )
+                        ingested_summaries.append(summary)
+                        status.write(
+                            f"✅ **{summary['book_name']}** indexed into **`{summary['kb_name']}`** "
+                            f"({summary['indexed_count']} chunks across {summary['sections_count']} sections)."
+                        )
+                    except Exception as err:
+                        status.write(f"❌ Failed to ingest {uploaded_file.name}: {err}")
+
+                status.update(label="🎉 Ingestion Complete!", state="complete", expanded=False)
+
+            if ingested_summaries:
+                st.success(f"Indexed {len(ingested_summaries)} book(s) into knowledge bases!")
+                st.rerun()
 
     st.divider()
 
-    st.markdown("### 🔍 Chunk Inspector *(read-only — does NOT affect agent)*")
-    st.caption("Browse raw chunks stored in a collection. This selector has no effect on how the agent searches.")
+    # Refresh knowledge bases after possible upload
+    knowledge_bases = list_knowledge_bases()
 
-    viewer_kb = st.selectbox(
-        "Browse collection:",
-        options=knowledge_bases,
-        index=0,
-        key="viewer_kb",
-    )
+    if knowledge_bases:
+        kb_info = {}
+        for kb in knowledge_bases:
+            col = get_collection(kb)
+            count = col.count()
+            sample = col.get(limit=1, include=["metadatas"])["metadatas"]
+            title = sample[0].get("book", "Unknown") if sample else "Unknown"
+            kb_info[kb] = (title, count)
 
-    with st.expander("Show chunks"):
-        viewer_col = get_collection(viewer_kb)
-        stored = viewer_col.get(include=["documents", "metadatas"])
+        total_chunks = sum(c for _, c in kb_info.values())
+        st.metric("Total Indexed Chunks", total_chunks)
 
-        if stored["ids"]:
-            rows = sorted(
-                zip(
-                    stored["ids"],
-                    stored["documents"],
-                    stored["metadatas"],
-                ),
-                key=lambda row: row[0],
-            )
+        st.markdown("### Indexed Books")
+        for kb, (title, count) in kb_info.items():
+            st.markdown(f"- **`{kb}`** → *{title}* ({count} chunks)")
 
-            books = sorted({m.get("book", "Unknown") for _, _, m in rows})
-            selected_book = st.selectbox("Book Filter", ["All Books", *books], key="chunk_book")
+        st.divider()
 
-            if selected_book != "All Books":
-                rows = [r for r in rows if r[2].get("book") == selected_book]
+        st.markdown("### 🔍 Chunk Inspector *(read-only)*")
+        st.caption("Browse raw chunks stored in a collection.")
 
-            sections = sorted({m.get("section", "Unknown") for _, _, m in rows})
-            selected_section = st.selectbox("Section Filter", ["All Sections", *sections], key="chunk_section")
+        viewer_kb = st.selectbox(
+            "Browse collection:",
+            options=knowledge_bases,
+            index=0,
+            key="viewer_kb",
+        )
 
-            if selected_section != "All Sections":
-                rows = [r for r in rows if r[2].get("section") == selected_section]
+        with st.expander("Show chunks"):
+            viewer_col = get_collection(viewer_kb)
+            stored = viewer_col.get(include=["documents", "metadatas"])
 
-            page_size = 5
-            page_count = max(1, (len(rows) + page_size - 1) // page_size)
-            page_number = st.number_input("Page", min_value=1, max_value=page_count, value=1)
-            start = (page_number - 1) * page_size
-
-            for chunk_id, text, metadata in rows[start : start + page_size]:
-                lines_str = (
-                    f" | ll. {metadata.get('line_start', '?')}-{metadata.get('line_end', '?')}"
-                    if "line_start" in metadata
-                    else ""
+            if stored["ids"]:
+                rows = sorted(
+                    zip(
+                        stored["ids"],
+                        stored["documents"],
+                        stored["metadatas"],
+                    ),
+                    key=lambda row: row[0],
                 )
-                title = f"{chunk_id} | pp. {metadata.get('page_start', '?')}-{metadata.get('page_end', '?')}{lines_str}"
 
-                with st.expander(title):
-                    st.markdown(f"**{metadata.get('section', 'Unknown')}**")
-                    lines_caption = (
-                        f" | Lines: {metadata.get('line_start', '?')}-{metadata.get('line_end', '?')}"
+                books = sorted({m.get("book", "Unknown") for _, _, m in rows})
+                selected_book = st.selectbox("Book Filter", ["All Books", *books], key="chunk_book")
+
+                if selected_book != "All Books":
+                    rows = [r for r in rows if r[2].get("book") == selected_book]
+
+                sections = sorted({m.get("section", "Unknown") for _, _, m in rows})
+                selected_section = st.selectbox("Section Filter", ["All Sections", *sections], key="chunk_section")
+
+                if selected_section != "All Sections":
+                    rows = [r for r in rows if r[2].get("section") == selected_section]
+
+                page_size = 5
+                page_count = max(1, (len(rows) + page_size - 1) // page_size)
+                page_number = st.number_input("Page", min_value=1, max_value=page_count, value=1)
+                start = (page_number - 1) * page_size
+
+                for chunk_id, text, metadata in rows[start : start + page_size]:
+                    lines_str = (
+                        f" | ll. {metadata.get('line_start', '?')}-{metadata.get('line_end', '?')}"
                         if "line_start" in metadata
                         else ""
                     )
-                    st.caption(f"Chapter: {metadata.get('chapter', 'Unknown')}{lines_caption}")
-                    st.write(text)
-        else:
-            st.info("No chunks available in this collection.")
+                    title = f"{chunk_id} | pp. {metadata.get('page_start', '?')}-{metadata.get('page_end', '?')}{lines_str}"
+
+                    with st.expander(title):
+                        st.markdown(f"**{metadata.get('section', 'Unknown')}**")
+                        lines_caption = (
+                            f" | Lines: {metadata.get('line_start', '?')}-{metadata.get('line_end', '?')}"
+                            if "line_start" in metadata
+                            else ""
+                        )
+                        st.caption(f"Chapter: {metadata.get('chapter', 'Unknown')}{lines_caption}")
+                        st.write(text)
+            else:
+                st.info("No chunks available in this collection.")
 
 
 # --------------------------------------------------
@@ -265,7 +259,7 @@ for message in st.session_state.messages:
                         )
                         st.markdown(
                             f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
-                            f"(Chapter {source.get('chapter','')}, "
+                            f"({source.get('chapter','')}, "
                             f"pp. {source['page_start']}-{source['page_end']}{lines_info})"
                         )
                         st.write(source["text"])
@@ -278,6 +272,10 @@ for message in st.session_state.messages:
                         )
                         st.write(source.get("text", ""))
 
+
+if not knowledge_bases:
+    st.info("👋 No books have been indexed yet. Upload one or more PDF books in the sidebar and click **🚀 Ingest & Index Books** to get started!")
+    st.stop()
 
 if not st.session_state.messages:
     st.info(
@@ -360,7 +358,7 @@ if question:
                             )
                             st.markdown(
                                 f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
-                                f"(Chapter {source.get('chapter','')}, "
+                                f"({source.get('chapter','')}, "
                                 f"pp. {source['page_start']}-{source['page_end']}{lines_info})"
                             )
                             st.write(source["text"])

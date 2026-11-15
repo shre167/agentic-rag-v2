@@ -17,6 +17,7 @@ Features for Corporate / Office Environments:
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 from langchain.tools import tool
@@ -147,7 +148,7 @@ def _search_wikipedia(query: str, max_results: int = 5, timeout: int = 5) -> lis
 def web_search(query: str, max_results: int = 5) -> str:
     """
     Search the live web for questions NOT covered by the indexed books (e.g. current events,
-    general technology, definitions, world facts, or topics outside Mind Management / Deep Work).
+    general technology, definitions, world facts, or topics outside the indexed books).
 
     Use this tool when:
     - The question is unrelated to the indexed books.
@@ -163,6 +164,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     Returns:
         Structured JSON with results, snippets, and citations.
     """
+    start_time = time.perf_counter()
     cleaned_query = query.strip()
     results = _search_ddg(cleaned_query, max_results=max_results, timeout=7)
     engine_used = "DuckDuckGo"
@@ -225,6 +227,8 @@ def web_search(query: str, max_results: int = 5) -> str:
             }
         )
 
+    latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
+
     return json.dumps(
         {
             "tool": "web_search",
@@ -234,6 +238,7 @@ def web_search(query: str, max_results: int = 5) -> str:
             "passages": passages,
             "items": [f"[{r['rank']}] {r['title']} — {r['url']}" for r in web_results],
             "web_results": web_results,
+            "latency_ms": latency_ms,
         },
         ensure_ascii=False,
     )

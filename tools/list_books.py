@@ -1,4 +1,5 @@
 import json
+import time
 
 from langchain.tools import tool
 
@@ -7,24 +8,36 @@ from retrieval.vector_store import get_collection, list_knowledge_bases
 _BOOK_CACHE: list[tuple[str, str]] | None = None
 
 
+def clear_book_cache():
+    """Clear the in-memory cache of indexed books to force discovery on next call."""
+    global _BOOK_CACHE
+    _BOOK_CACHE = None
+
+
 @tool
 def list_books() -> str:
     """
     Discover all available knowledge bases and the books indexed in each one.
 
-    Call this FIRST before any semantic_search call. The response tells you
-    which kb_name to pass to semantic_search for each book.
+    When searching books, call this before semantic_search to discover which
+    kb_name to pass for each book. Do NOT call this for greetings or general questions.
 
     Returns a JSON object with:
       - routing_map: dict mapping kb_name -> book title
       - instruction: explicit guidance on how to use kb_name in semantic_search
       - items: list of "kb_name: Book Title" strings
     """
+    start_time = time.perf_counter()
     global _BOOK_CACHE
     if _BOOK_CACHE is None:
         books = []
         for kb_name in list_knowledge_bases():
             col = get_collection(kb_name)
+            col_book = (getattr(col, "metadata", None) or {}).get("book")
+            if col_book:
+                books.append((kb_name, col_book))
+                continue
+
             meta_sample = col.get(limit=5, include=["metadatas"])["metadatas"]
             titles = sorted({item.get("book", "Unknown") for item in meta_sample if item.get("book")})
             if not titles:
@@ -48,6 +61,8 @@ def list_books() -> str:
         "Do NOT search only one kb if the question spans multiple books."
     )
 
+    latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
+
     return json.dumps(
         {
             "tool": "list_books",
@@ -57,6 +72,7 @@ def list_books() -> str:
             "instruction": routing_instructions,
             "passages": [],
             "items": items,
+            "latency_ms": latency_ms,
         },
         ensure_ascii=False,
     )
