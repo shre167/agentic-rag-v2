@@ -7,6 +7,7 @@ from agentic_rag import answer_with_agent
 from ingest import ingest_pdf
 from retrieval.vector_store import get_collection, list_knowledge_bases
 from settings import ROOT
+from chat_storage import load_chat_history, save_chat_history, clear_chat_history, get_all_sessions
 
 
 st.set_page_config(
@@ -229,8 +230,39 @@ st.caption(
     "The agent dynamically decides which collections to search, reasons about its strategy, and synthesizes answers with citations."
 )
 
+# Session management in sidebar
+with st.sidebar:
+    st.divider()
+    st.markdown("### 💬 Chat Sessions")
+    
+    all_sessions = get_all_sessions()
+    current_session = st.selectbox(
+        "Select session",
+        options=all_sessions or ["default"],
+        index=0 if all_sessions else 0,
+        key="session_selector",
+    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ Clear Chat", use_container_width=True):
+            clear_chat_history(current_session)
+            st.session_state.messages = []
+            st.rerun()
+    
+    with col2:
+        if st.button("➕ New Session", use_container_width=True):
+            new_session_name = st.text_input("Session name", value="session_1", key="new_session_input")
+            if new_session_name:
+                st.session_state.current_session = new_session_name
+                st.rerun()
+
+# Load chat history from persistent storage
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = load_chat_history(current_session)
+
+if "current_session" not in st.session_state:
+    st.session_state.current_session = current_session
 
 
 for message in st.session_state.messages:
@@ -385,6 +417,9 @@ if question:
                 "answer_type": answer_type,
             }
         )
+        
+        # Save to persistent storage
+        save_chat_history(st.session_state.messages, st.session_state.current_session)
 
     except Exception as error:
         error_message = f"Could not answer this question: {error}"
@@ -394,5 +429,8 @@ if question:
                 "content": error_message,
             }
         )
+        # Save to persistent storage
+        save_chat_history(st.session_state.messages, st.session_state.current_session)
+        
         with st.chat_message("assistant"):
             st.error(error_message)
