@@ -90,20 +90,59 @@ def route_query(
     extracted_page = int(page_match.group(1)) if page_match else None
     extracted_line = int(line_match.group(1)) if line_match else None
 
-    llm = _get_router_llm()
-    if llm is None:
-        # Fallback to pure embedding ranking if LLM unavailable
-        top = candidates[0]
-        if top["similarity"] > 0.25:
+    # ─────────────────────────────────────────────────────────────
+    # Fast-Path 1: Direct Title / Author Keyword Match (0 ms)
+    # ─────────────────────────────────────────────────────────────
+    q_lower = query.lower()
+    for c in candidates:
+        title_words = [w for w in c["book_title"].lower().split() if len(w) > 3]
+        if c["book_title"].lower() in q_lower or (title_words and all(w in q_lower for w in title_words)):
             return {
                 "is_match": True,
-                "selected_kbs": [top["kb_name"]],
-                "sub_queries": {top["kb_name"]: query},
+                "selected_kbs": [c["kb_name"]],
+                "sub_queries": {c["kb_name"]: query},
                 "chapter": None,
                 "page": extracted_page,
                 "line": extracted_line,
-                "reason": f"Routed to {top['book_title']} by embedding similarity ({top['similarity']:.2f}).",
+                "reason": f"Direct title match: '{c['book_title']}'",
             }
+
+    top = candidates[0]
+    runner_up = candidates[1] if len(candidates) > 1 else None
+
+    # ─────────────────────────────────────────────────────────────
+    # Fast-Path 2: Decisive Embedding Similarity Match (< 2 ms)
+    # Avoids redundant LLM round-trip when similarity is confident.
+    # ─────────────────────────────────────────────────────────────
+    is_comparative = bool(re.search(r"\b(compare|both|difference|versus|vs)\b", q_lower))
+
+    if is_comparative and runner_up and top["similarity"] >= 0.22 and runner_up["similarity"] >= 0.22:
+        selected = [top["kb_name"], runner_up["kb_name"]]
+        return {
+            "is_match": True,
+            "selected_kbs": selected,
+            "sub_queries": {kb: query for kb in selected},
+            "chapter": None,
+            "page": extracted_page,
+            "line": extracted_line,
+            "reason": f"Comparative match across {top['book_title']} ({top['similarity']:.2f}) and {runner_up['book_title']} ({runner_up['similarity']:.2f})",
+        }
+
+    if top["similarity"] >= 0.25 and (runner_up is None or (top["similarity"] - runner_up["similarity"]) >= 0.05):
+        return {
+            "is_match": True,
+            "selected_kbs": [top["kb_name"]],
+            "sub_queries": {top["kb_name"]: query},
+            "chapter": None,
+            "page": extracted_page,
+            "line": extracted_line,
+            "reason": f"High confidence embedding match with {top['book_title']} ({top['similarity']:.2f})",
+        }
+
+    # ─────────────────────────────────────────────────────────────
+    # Fast-Path 3: Irrelevant Query Check (< 0.10 similarity)
+    # ─────────────────────────────────────────────────────────────
+    if top["similarity"] < 0.10:
         return {
             "is_match": False,
             "selected_kbs": [],
@@ -111,7 +150,23 @@ def route_query(
             "chapter": None,
             "page": None,
             "line": None,
-            "reason": "Embedding similarity below threshold and LLM router unavailable.",
+            "reason": f"Embedding similarity too low ({top['similarity']:.2f}) — query is outside indexed books.",
+        }
+
+    # ─────────────────────────────────────────────────────────────
+    # Ambiguous / Boundary Case: Use Router LLM as Tiebreaker
+    # ─────────────────────────────────────────────────────────────
+    llm = _get_router_llm()
+    if llm is None:
+        # Fallback to top embedding candidate
+        return {
+            "is_match": True,
+            "selected_kbs": [top["kb_name"]],
+            "sub_queries": {top["kb_name"]: query},
+            "chapter": None,
+            "page": extracted_page,
+            "line": extracted_line,
+            "reason": f"Fallback to {top['book_title']} by embedding similarity ({top['similarity']:.2f}).",
         }
 
     system_instruction = f"""You are the Semantic Retrieval Router for an Agentic RAG system with multi-book collections.

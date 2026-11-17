@@ -67,30 +67,35 @@ def get_kb_registry() -> Dict[str, Dict[str, Any]]:
             col_meta = getattr(col, "metadata", None) or {}
             book_title = col_meta.get("book")
 
-            sample_metas = col.get(limit=15, include=["metadatas"])["metadatas"]
+            # Gather all distinct chapters and sections using metadata index
+            from retrieval.retrieval import _get_metadata_index
+            meta_index = _get_metadata_index(col, kb_name)
+
+            if not book_title and meta_index.get("books"):
+                book_title = meta_index["books"][0]
             if not book_title:
-                titles = sorted({m.get("book") for m in sample_metas if m.get("book")})
-                book_title = titles[0] if titles else kb_name
+                book_title = kb_name
 
-            # Gather sample chapters and sections for semantic profiling
-            chapters = sorted({m.get("chapter") for m in sample_metas if m.get("chapter") and m.get("chapter") != "Front matter"})
-            sections = sorted({m.get("section") for m in sample_metas if m.get("section") and m.get("section") != "Front matter"})
+            raw_chapters = [c for c in meta_index.get("chapters", []) if c != "Front matter"]
+            raw_sections = [s for s in meta_index.get("sections", []) if s != "Front matter"]
 
-            # Sample some document text to understand key themes
-            doc_sample = col.get(limit=3, include=["documents"])["documents"]
-            sample_text = " ".join(doc_sample)[:300] if doc_sample else ""
+            # Filter out boilerplate sections
+            sections = [
+                s for s in raw_sections
+                if not any(b in s.upper() for b in ["ACKNOWLEDGEMENTS", "ABOUT THE AUTHOR", "BONUS MATERIAL", "ALSO BY"])
+            ]
 
             profile_text = (
                 f"Knowledge Base: {kb_name}. Book: {book_title}. "
-                f"Chapters: {', '.join(chapters[:8])}. "
-                f"Topics and Sections: {', '.join(sections[:8])}. {sample_text}"
+                f"Chapters: {', '.join(raw_chapters[:12])}. "
+                f"Topics and Sections: {', '.join(sections[:20])}."
             )
 
             registry[kb_name] = {
                 "kb_name": kb_name,
                 "book_title": book_title,
                 "total_chunks": count,
-                "chapters": chapters,
+                "chapters": raw_chapters,
                 "sections": sections,
                 "profile_text": profile_text,
                 "embedding": None,
