@@ -148,15 +148,40 @@ def semantic_search(
             return tool_result(
                 "semantic_search",
                 search_desc,
-                f"NO_MATCH: Collections ({kbs_str}) had no passages matching '{query}'. Try web_search.",
+                f"NO_MATCH: Collections ({kbs_str}) had no passages matching '{query}'. Try another KB or invoke web_search.",
                 passages=[],
                 latency_ms=latency_ms,
+            )
+
+        # ─────────────────────────────────────────────────────────────
+        # Evidence Relevance & Confidence Evaluation
+        # ─────────────────────────────────────────────────────────────
+        max_rerank = max((p.get("rerank_score", 0.0) for p in all_passages), default=0.0)
+        avg_dist = sum(float(p.get("distance", 1.0)) for p in all_passages) / len(all_passages) if all_passages else 1.0
+
+        if max_rerank >= 0.40 and avg_dist <= 0.48:
+            confidence = "high"
+        elif max_rerank >= 0.22 or avg_dist <= 0.58:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        if confidence == "low":
+            summary_msg = (
+                f"INSUFFICIENT_EVIDENCE: Retrieved {len(all_passages)} passages from [{kbs_str}] but relevance confidence is LOW "
+                f"(max_score={max_rerank:.2f}, avg_distance={avg_dist:.2f}). "
+                f"If insufficient to answer, retry another knowledge base or invoke web_search."
+            )
+        else:
+            summary_msg = (
+                f"Retrieved {len(all_passages)} passages across [{kbs_str}] with {confidence.upper()} confidence "
+                f"(max_score={max_rerank:.2f}): {route.get('reason', '')}"
             )
 
         return tool_result(
             "semantic_search",
             search_desc,
-            f"Retrieved {len(all_passages)} passages across [{kbs_str}]: {route.get('reason', '')}",
+            summary_msg,
             passages=all_passages,
             latency_ms=latency_ms,
         )

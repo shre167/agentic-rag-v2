@@ -385,6 +385,25 @@ def answer_with_agent(
             "answer_type": answer_type,
         })
 
+    # Check if a specific page lookup hit an empty page (e.g. cover art or image)
+    empty_page_found = next(
+        (step.get("result") for step in activity if "EMPTY_PAGE" in step.get("result", "")),
+        None,
+    )
+    if empty_page_found and not passages_by_id:
+        clean_msg = empty_page_found.replace("EMPTY_PAGE:", "").strip()
+        final_empty_answer = (
+            f"Nothing was retrieved for this page. {clean_msg}"
+        )
+        activity.append(
+            {
+                "action": "Generate grounded answer",
+                "result": final_empty_answer,
+                "citation_status": "empty_page",
+            }
+        )
+        return AgentResult(final_empty_answer, [], activity, reasoning, "book")
+
     # Allow general answers (no sources required) and web answers.
     if not passages_by_id and answer_type == "book":
         activity.append(
