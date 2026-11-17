@@ -25,14 +25,13 @@ _ANSWER_TYPE_META = {
 
 # Tool display config
 _TOOL_META = {
-    "list_books":      {"icon": "📋", "label": "List Books"},
-    "semantic_search": {"icon": "🔍", "label": "Semantic Search (Book)"},
+    "semantic_search": {"icon": "🔍", "label": "Semantic Search & Router"},
     "web_search":      {"icon": "🌐", "label": "Web Search"},
 }
 
 
 def render_agent_activity(activity: List[Dict]):
-    """Render tool execution trace with tool name, latency, and reasons inline (no dropdown/expander)."""
+    """Render tool execution trace with tool name, latency, routing decision, and found summary."""
     tool_steps = [s for s in activity if s.get("tool")]
     if not tool_steps:
         return
@@ -48,20 +47,25 @@ def render_agent_activity(activity: List[Dict]):
         else:
             latency_str = "< 10 ms"
 
-        reason = (
-            step.get("tool_reasoning")
-            or step.get("why_repeated")
-            or step.get("why_web_instead_of_semantic")
-            or step.get("found_summary")
-            or "Executed for query context"
-        )
+        found_summary = step.get("found_summary", "")
+        tool_reasoning = step.get("tool_reasoning", "")
+        is_no_match = "NO_MATCH" in found_summary
+
+        reason = tool_reasoning or found_summary or "Executed for query context"
 
         col1, col2 = st.columns([5, 1])
         with col1:
-            st.markdown(f"**{meta['icon']} {meta['label']}** (Step {step_number}) — {reason}")
+            if is_no_match:
+                st.markdown(
+                    f"**{meta['icon']} {meta['label']}** (Step {step_number}) — "
+                    f"⚠️ No matching book found — routing to web search."
+                )
+            else:
+                st.markdown(f"**{meta['icon']} {meta['label']}** (Step {step_number}) — {reason}")
+            if found_summary and not is_no_match and found_summary != tool_reasoning:
+                st.caption(f"📄 {found_summary}")
         with col2:
             st.caption(f"⏱️ `{latency_str}`")
-
 
 
 # --------------------------------------------------

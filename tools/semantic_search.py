@@ -1,15 +1,30 @@
+"""
+Semantic Search Tool with Dynamic KB Discovery & Semantic Router
+==================================================================
+Combines dynamic knowledge base discovery, embedding-based candidate scoring,
+and LLM routing into a single unified search tool.
+
+Features:
+- Dynamically discovers all ingested KBs in ChromaDB.
+- Uses semantic router to route queries to the right KB (or multiple KBs for comparisons).
+- Executes Dense Search + BM25 + RRF reranking via retrieve_chunks.
+- Detects irrelevant queries and returns a NO_MATCH result so the agent can invoke web_search.
+- Preserves direct kb_name parameter for backward compatibility.
+"""
+
 import re
 import time
 from langchain.tools import tool
 
 from retrieval.retrieval import retrieve_chunks
+from retrieval.semantic_router import route_query
 from tools.results import tool_result
 
 
 @tool
 def semantic_search(
     query: str,
-    kb_name: str,
+    kb_name: str = "",
     book: str = "",
     chapter: str = "",
     section: str = "",
@@ -18,24 +33,28 @@ def semantic_search(
     k: int = 5,
 ) -> str:
     """
-    Semantic search with metadata-aware filtering (page, line, chapter, section).
+    Metadata-aware semantic search across indexed book collections.
+    Dynamically discovers all knowledge bases, uses an embedding + LLM router to select
+    the appropriate collection(s), and retrieves relevant passages with citations.
 
-    Automatically handles page, line, chapter, and section filtering based on parameters or query.
+    If the query cannot be answered by any indexed book, it returns a NO_MATCH signal
+    so the agent can invoke web_search.
 
     Args:
-        query: Search term or concept
-        kb_name: Knowledge base (kb1 or kb2)
-        book: Book name (optional)
-        chapter: Chapter name/number (optional, e.g., "chapter 3" or "3")
-        section: Section name (optional, e.g., "deep work")
-        page: Page number (optional, e.g. 50 or "50")
-        line: Line number on page (optional, e.g. 10 or "10")
-        k: Number of results (default 5)
+        query: Search term or concept (e.g. "Cal Newport rules for deep work" or "page 10 line 15")
+        kb_name: Optional specific KB name (e.g. 'kb1', 'kb2'). If omitted, automatically routed.
+        book: Optional book title filter.
+        chapter: Optional chapter name or number (e.g. "chapter 3" or "3").
+        section: Optional section name.
+        page: Optional page number (e.g. 50).
+        line: Optional line number.
+        k: Number of passages to retrieve per collection (default 5).
 
     Returns:
-        Passages with metadata: page_start, page_end, line_start, line_end, chapter, section
+        Structured JSON string containing passages, metadata, citations, and routing reasoning.
     """
     start_time = time.perf_counter()
+
     parsed_page: int | None = None
     if page is not None:
         if isinstance(page, int):
@@ -69,11 +88,82 @@ def semantic_search(
     # Auto-extract chapter from query if not explicitly passed
     if not chapter:
         WORD_NUMS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5"}
-        match = re.search(r"\b(chapter|rule)\s+(?:#\s*)?(\d+|one|two|three|four|five)\b", query, re.IGNORECASE)
-        if match:
-            kind, val = match.group(1).title(), match.group(2).lower()
+        ch_match = re.search(r"\b(chapter|rule)\s+(?:#\s*)?(\d+|one|two|three|four|five)\b", query, re.IGNORECASE)
+        if ch_match:
+            kind, val = ch_match.group(1).title(), ch_match.group(2).lower()
             chapter = f"{kind} {WORD_NUMS.get(val, val)}"
 
+    # ─────────────────────────────────────────────────────────────
+    # CASE 1: Automatic Routing via Semantic Retrieval Router
+    # ─────────────────────────────────────────────────────────────
+    if not kb_name or kb_name.strip().lower() in {"auto", "all", "none", ""}:
+        route = route_query(query)
+
+        # Requirement 5: Handle irrelevant queries
+        if not route.get("is_match") or not route.get("selected_kbs"):
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
+            reason = route.get("reason", "Query is outside the scope of all indexed books.")
+            return tool_result(
+                "semantic_search",
+                query,
+                f"NO_MATCH: No relevant knowledge base found. {reason} Recommend using web_search.",
+                passages=[],
+                latency_ms=latency_ms,
+            )
+
+        selected_kbs = route["selected_kbs"]
+        sub_queries = route.get("sub_queries", {})
+        router_chapter = chapter or route.get("chapter")
+        router_page = parsed_page if parsed_page is not None else route.get("page")
+        router_line = parsed_line if parsed_line is not None else route.get("line")
+
+        all_passages = []
+        for target_kb in selected_kbs:
+            kb_query = sub_queries.get(target_kb, query)
+            passages = retrieve_chunks(
+                query=kb_query,
+                kb_name=target_kb,
+                k=k,
+                book=book or None,
+                chapter=router_chapter or None,
+                section=section or None,
+                page=router_page,
+                line=router_line,
+            )
+            all_passages.extend(passages)
+
+        latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
+        kbs_str = ", ".join(selected_kbs)
+        search_desc = f'"{query}" [routed to: {kbs_str}]'
+
+        if not all_passages:
+            if router_page is not None:
+                return tool_result(
+                    "semantic_search",
+                    search_desc,
+                    f"EMPTY_PAGE: Page {router_page} has no indexed text in ({kbs_str}). In the PDF it is likely an image, illustration, cover art, or blank page.",
+                    passages=[],
+                    latency_ms=latency_ms,
+                )
+            return tool_result(
+                "semantic_search",
+                search_desc,
+                f"NO_MATCH: Collections ({kbs_str}) had no passages matching '{query}'. Try web_search.",
+                passages=[],
+                latency_ms=latency_ms,
+            )
+
+        return tool_result(
+            "semantic_search",
+            search_desc,
+            f"Retrieved {len(all_passages)} passages across [{kbs_str}]: {route.get('reason', '')}",
+            passages=all_passages,
+            latency_ms=latency_ms,
+        )
+
+    # ─────────────────────────────────────────────────────────────
+    # CASE 2: Explicit kb_name Provided (Direct Retrieval / Backward Compatible)
+    # ─────────────────────────────────────────────────────────────
     search_desc = f'"{query}" [kb: {kb_name}'
     if parsed_page is not None:
         search_desc += f", page: {parsed_page}"
@@ -99,10 +189,18 @@ def semantic_search(
     latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
 
     if not passages:
+        if parsed_page is not None:
+            return tool_result(
+                "semantic_search",
+                search_desc,
+                f"EMPTY_PAGE: Page {parsed_page} in {kb_name} contains no indexed text (it is likely an image, illustration, cover art, or blank page in the PDF).",
+                [],
+                latency_ms=latency_ms,
+            )
         return tool_result(
             "semantic_search",
             search_desc,
-            "No relevant passages found",
+            f"No relevant passages found in {kb_name}.",
             [],
             latency_ms=latency_ms,
         )

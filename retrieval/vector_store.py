@@ -86,6 +86,12 @@ def index_chunks(
         pass
 
     try:
+        from retrieval.kb_registry import clear_kb_registry_cache
+        clear_kb_registry_cache()
+    except Exception:
+        pass
+
+    try:
         from tools.list_books import clear_book_cache
         clear_book_cache()
     except Exception:

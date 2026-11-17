@@ -1,26 +1,23 @@
 """
 Agent Builder
 =============
-Constructs a ReAct agent with three tools:
-  1. list_books      — discover which KBs exist (always call first)
-  2. semantic_search — search indexed book content with metadata filters
-  3. web_search      — DuckDuckGo search for non-book / general queries
+Constructs an autonomous ReAct agent with two core tools:
+  1. semantic_search — Dynamic KB discovery + embedding/LLM semantic router + multi-book retrieval
+  2. web_search      — DuckDuckGo search for live/external topics or when books have NO_MATCH
 """
 
 from langchain.agents import create_agent
 
 from agent.prompts import SYSTEM_PROMPT
-from tools.list_books import list_books
 from tools.semantic_search import semantic_search
 from tools.web_search import web_search
 
 
 def build_agent(llm):
-    """Build ReAct agent with list_books, semantic_search, and web_search tools."""
+    """Build ReAct agent with semantic_search and web_search tools."""
     tools = [
-        list_books,       # Step 1: discover routing_map
-        semantic_search,  # Step 2A: book content (page/chapter/section/line aware)
-        web_search,       # Step 2B: live web for non-book questions
+        semantic_search,  # Automatically routes to relevant KB(s) and retrieves chunks
+        web_search,       # Live web search for non-book or external topics
     ]
 
     return create_agent(
