@@ -293,8 +293,9 @@ for message in st.session_state.messages:
                             if "line_start" in source
                             else ""
                         )
+                        kb_info = f" [{source.get('kb_name', 'kb')}]" if source.get('kb_name') else ""
                         st.markdown(
-                            f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
+                            f"**[{source['id']}] {source.get('book', 'Book')}{kb_info} — {source['section']}** "
                             f"({source.get('chapter','')}, "
                             f"pp. {source['page_start']}-{source['page_end']}{lines_info})"
                         )
@@ -392,8 +393,9 @@ if question:
                                 if "line_start" in source
                                 else ""
                             )
+                            kb_info = f" [{source.get('kb_name', 'kb')}]" if source.get('kb_name') else ""
                             st.markdown(
-                                f"**[{source['id']}] {source.get('book', 'Book')} — {source['section']}** "
+                                f"**[{source['id']}] {source.get('book', 'Book')}{kb_info} — {source['section']}** "
                                 f"({source.get('chapter','')}, "
                                 f"pp. {source['page_start']}-{source['page_end']}{lines_info})"
                             )

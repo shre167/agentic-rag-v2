@@ -8,11 +8,11 @@ Simple Semantic Search Tool with Auto-Routing
 """
 
 import re
+import json
 from langchain.tools import tool
 
 from retrieval.vector_store import list_knowledge_bases
 from retrieval.retrieval import retrieve_chunks
-from tools.results import tool_result
 
 
 # KB Book name mappings - automatically discovered
@@ -79,6 +79,8 @@ def semantic_search(
     Returns:
         Passages with metadata from searched KB(s)
     """
+    import time
+    start_time = time.time()
     
     # Auto-extract page number from query
     parsed_page = None
@@ -90,17 +92,28 @@ def semantic_search(
     if kb_name and kb_name.strip():
         # Explicit KB provided
         target_kbs = [kb_name.strip()]
+        routing_reason = f"Explicit KB specified: {kb_name}"
     else:
         # Auto-detect from query
         target_kbs = _detect_kbs_from_query(query)
+        if not target_kbs:
+            routing_reason = "No matching books found in query"
+        elif len(target_kbs) > 1:
+            routing_reason = f"Multi-book search detected: {', '.join(target_kbs)}"
+        else:
+            routing_reason = f"Book mentioned in query: {target_kbs[0]}"
     
     if not target_kbs:
-        return tool_result(
-            "semantic_search",
-            query,
-            "No knowledge bases found.",
-            [],
-        )
+        result_data = {
+            "tool": "semantic_search",
+            "input": query,
+            "result": "No knowledge bases found.",
+            "passages": [],
+            "items": [],
+            "tool_reasoning": routing_reason,
+            "latency_ms": (time.time() - start_time) * 1000,
+        }
+        return json.dumps(result_data, ensure_ascii=False)
     
     # Search each KB and collect results
     all_passages = []
@@ -115,6 +128,9 @@ def semantic_search(
         )
         
         if passages:
+            # Ensure each passage has correct KB metadata
+            for p in passages:
+                p["kb_name"] = kb  # Explicitly set KB name
             all_passages.extend(passages)
             searched_kbs.append(kb)
     
@@ -125,16 +141,28 @@ def semantic_search(
         search_desc += f", page: {parsed_page}"
     
     if not all_passages:
-        return tool_result(
-            "semantic_search",
-            search_desc,
-            f"No relevant passages found in {kbs_str}.",
-            [],
-        )
+        result_data = {
+            "tool": "semantic_search",
+            "input": search_desc,
+            "result": f"No relevant passages found in {kbs_str}.",
+            "passages": [],
+            "items": [],
+            "tool_reasoning": routing_reason,
+            "latency_ms": (time.time() - start_time) * 1000,
+        }
+        return json.dumps(result_data, ensure_ascii=False)
     
-    return tool_result(
-        "semantic_search",
-        search_desc,
-        f"Found {len(all_passages)} passages from {kbs_str}",
-        all_passages,
-    )
+    # Format items for display
+    items = [f"[{p['id']}] {p.get('book', '?')} - {p.get('section', '')}" for p in all_passages]
+    
+    result_data = {
+        "tool": "semantic_search",
+        "input": search_desc,
+        "result": f"Found {len(all_passages)} passages from {kbs_str}",
+        "passages": all_passages,
+        "items": items,
+        "tool_reasoning": routing_reason,
+        "latency_ms": (time.time() - start_time) * 1000,
+    }
+    
+    return json.dumps(result_data, ensure_ascii=False)

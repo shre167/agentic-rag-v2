@@ -270,15 +270,21 @@ def answer_with_agent(
 
         # Genuine LLM thought for why this tool was called (not hardcoded).
         why_called = thought_for_this_call
+        
+        # Try to get tool_reasoning from payload first, then fall back to hardcoded logic
+        tool_reasoning = payload.get("tool_reasoning", "")
+        
         if not why_called:
-            if tool_name == "semantic_search":
+            if tool_reasoning:
+                why_called = tool_reasoning
+            elif tool_name == "semantic_search":
                 result_text = payload.get("result", "")
                 if "NO_MATCH" in result_text:
-                    why_called = "Semantic router found no relevant indexed book; will fallback to web_search."
+                    why_called = "No relevant books found in knowledge base; will fallback to web search."
                 else:
-                    why_called = f"Semantic router selected KB(s): {payload.get('result', 'auto-routed')}"
+                    why_called = result_text
             elif tool_name == "web_search":
-                why_called = "Query outside indexed books — searching live web sources."
+                why_called = "Searching external web sources since books didn't have relevant information."
             else:
                 why_called = f"Execute {tool_name}"
 
@@ -294,9 +300,10 @@ def answer_with_agent(
         is_no_match = "NO_MATCH" in result_text
 
         if tool_name == "web_search":
-            if web_results:
-                what_found_items = [f"[{r['rank']}] {r['title']} ({r.get('url','')})" for r in web_results]
-                found_summary = f"Found {len(web_results)} web article(s) via {payload.get('engine', 'web')}"
+            items = payload.get("items", [])
+            if items:
+                what_found_items = items
+                found_summary = f"Found {len(items)} web result(s)"
             else:
                 found_summary = "No web results found."
         elif tool_name == "semantic_search":
@@ -327,8 +334,7 @@ def answer_with_agent(
             "found_summary": found_summary,
             "what_found_items": what_found_items,
             "matches": len(passages),
-            "web_results": web_results if tool_name == "web_search" else None,
-            "tool_reasoning": why_called,
+            "tool_reasoning": why_called,  # Include the reasoning
             "latency_ms": payload.get("latency_ms"),
         }
 
