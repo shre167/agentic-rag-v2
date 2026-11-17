@@ -140,18 +140,10 @@ def route_query(
         }
 
     # ─────────────────────────────────────────────────────────────
-    # Fast-Path 3: Irrelevant Query Check (< 0.10 similarity)
+    # Fast-Path 3: Irrelevant Query Check - REMOVED
+    # Always try to search books, even with low similarity
+    # Let the actual retrieval decide if results are useful
     # ─────────────────────────────────────────────────────────────
-    if top["similarity"] < 0.10:
-        return {
-            "is_match": False,
-            "selected_kbs": [],
-            "sub_queries": {},
-            "chapter": None,
-            "page": None,
-            "line": None,
-            "reason": f"Embedding similarity too low ({top['similarity']:.2f}) — query is outside indexed books.",
-        }
 
     # ─────────────────────────────────────────────────────────────
     # Ambiguous / Boundary Case: Use Router LLM as Tiebreaker

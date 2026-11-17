@@ -3,16 +3,14 @@ from langchain.agents import create_agent
 from .prompts import SYSTEM_PROMPT
 
 from tools.semantic_search import semantic_search
-from tools.list_books import list_books
 from tools.web_search import web_search
 
 
 def build_agent(llm):
-    """Build agent with 3 tools: list_books, semantic_search (primary), web_search (fallback)."""
+    """Build agent with 2 tools: semantic_search (auto-routing), web_search (fallback)."""
     tools = [
-        list_books,      # Discover available books
-        semantic_search, # Search book content (PRIMARY)
-        web_search,      # Search web (FALLBACK ONLY - for irrelevant queries)
+        semantic_search, # Auto-discovers KBs and searches
+        web_search,      # Fallback for external queries
     ]
     
     return create_agent(
