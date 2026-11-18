@@ -3,7 +3,7 @@
 import json
 import time
 from langchain_core.tools import tool
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from tools.results import tool_result
 
 
@@ -22,7 +22,7 @@ def web_search(query: str) -> str:
     
     try:
         ddgs = DDGS()
-        results = ddgs.text(query, max_results=3)
+        results = list(ddgs.text(query, max_results=3))
         
         if not results:
             return tool_result(

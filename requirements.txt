@@ -6,3 +6,4 @@ pypdf>=5.0
 pymupdf>=1.24
 openai>=1.0
 streamlit>=1.40
+ddgs>=9.0.0
