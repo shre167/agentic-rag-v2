@@ -252,10 +252,26 @@ with st.sidebar:
     
     with col2:
         if st.button("➕ New Session", use_container_width=True):
-            new_session_name = st.text_input("Session name", value="session_1", key="new_session_input")
-            if new_session_name:
+            st.session_state.show_new_session_input = True
+    
+    # Show input for new session name
+    if st.session_state.get("show_new_session_input"):
+        new_session_name = st.text_input(
+            "Enter session name",
+            value="",
+            placeholder="e.g., Deep Work Notes",
+            key="new_session_name_input",
+        )
+        if new_session_name:
+            if st.button("✅ Create Session", use_container_width=True):
                 st.session_state.current_session = new_session_name
+                st.session_state.show_new_session_input = False
+                st.session_state.messages = []
                 st.rerun()
+        
+        if st.button("❌ Cancel", use_container_width=True):
+            st.session_state.show_new_session_input = False
+            st.rerun()
 
 # Load chat history from persistent storage
 if "messages" not in st.session_state:

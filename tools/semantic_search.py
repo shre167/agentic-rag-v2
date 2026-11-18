@@ -31,7 +31,7 @@ def _detect_kbs_from_query(query: str) -> list:
     """
     Simple logic to detect which KB(s) to search.
     - If book name mentioned → search that KB
-    - If comparison words → search all KBs
+    - If explicit comparison words ("compare", "both") → search all KBs
     - Otherwise → search all KBs
     """
     query_lower = query.lower()
@@ -42,17 +42,23 @@ def _detect_kbs_from_query(query: str) -> list:
         if book_keywords in query_lower:
             selected_kbs.append(kb_name)
     
-    # Check for comparison words
-    comparison_words = ["compare", "both", "difference", "versus", "vs", "and"]
-    is_comparison = any(word in query_lower for word in comparison_words)
+    # Check for EXPLICIT comparison words (not just "and")
+    comparison_words = ["compare", "both", "difference", "versus", "vs"]
+    is_explicit_comparison = any(word in query_lower for word in comparison_words)
     
-    # If no specific book mentioned OR it's a comparison → search all KBs
-    if not selected_kbs or is_comparison:
+    # If explicit comparison → search all KBs (even if a book was mentioned)
+    if is_explicit_comparison:
         available = _get_available_kbs()
         if available:
-            selected_kbs = available
+            return available
     
-    return selected_kbs
+    # If a specific book was mentioned → search only that KB
+    if selected_kbs:
+        return selected_kbs
+    
+    # If no specific book mentioned → search all KBs
+    available = _get_available_kbs()
+    return available if available else []
 
 
 @tool
