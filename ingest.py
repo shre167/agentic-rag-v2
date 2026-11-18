@@ -1,6 +1,8 @@
 import argparse
 import re
+import time
 from pathlib import Path
+from typing import Any, Callable, Optional
 
 from chunking import extract_sections, make_chunks
 from retrieval.vector_store import (
@@ -51,6 +53,7 @@ def ingest_pdf(
     kb_name: str | None = None,
     preview: bool = False,
     overwrite: bool = False,
+    progress_callback: Any = None,
 ) -> dict:
     """
     Extract, chunk with structure-aware metadata, and index a PDF into a dedicated knowledge base.
@@ -67,14 +70,23 @@ def ingest_pdf(
                  If None, automatically reuses existing KB for this book or creates the next 'kbN'.
         preview: If True, extracts and chunks without writing to ChromaDB.
         overwrite: If True, removes existing chunks and profile for this KB before re-indexing.
+        progress_callback: Optional callable(str) receiving live status updates for the entire procedure.
 
     Returns:
         dict: Ingestion summary including kb_name, book_name, chunks_count, sections_count,
-              and profile_generated status.
+              page_count, chapters_count, profile_generated status, and the generated profile dict.
     """
+    def _notify(msg: str):
+        if callable(progress_callback):
+            progress_callback(msg)
+        print(msg)
+
     pdf_path = Path(pdf_path).resolve()
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+
+    file_size_mb = pdf_path.stat().st_size / (1024 * 1024)
+    _notify(f"File verified: {pdf_path.name} ({file_size_mb:.1f} MB)")
 
     # Determine clean book name
     if not book_name:
@@ -88,33 +100,58 @@ def ingest_pdf(
         existing_kb = find_kb_for_book(book_name)
         kb_name = existing_kb if existing_kb else get_next_kb_name()
     kb_name = kb_name.strip()
+    _notify(f"Assigned Knowledge Base: '{kb_name}' for '{book_name}'")
+
+    t_start = time.perf_counter()
+    parse_sec = 0.0
+    chunk_sec = 0.0
+    index_sec = 0.0
+    profile_sec = 0.0
 
     # If overwrite requested and KB already exists, purge it completely first
     if not preview and overwrite and kb_name in list_knowledge_bases():
+        _notify(f"Purging existing collection '{kb_name}' and previous chunks...")
         delete_knowledge_base(kb_name)
 
     # Extract sections with chapter, heading, page, and line metadata
+    _notify(f"Parsing PDF document and extracting structural sections...")
+    t_parse = time.perf_counter()
     sections = extract_sections(pdf_path=pdf_path, book_name=book_name)
     if not sections:
         raise ValueError("No text sections could be extracted from the PDF.")
+    parse_sec = round(time.perf_counter() - t_parse, 2)
+
+    total_pages = max((s.page_end for s in sections), default=0)
+    unique_chapters = sorted({s.chapter for s in sections if s.chapter and s.chapter != "Front matter"})
+    _notify(f"Extracted {len(sections)} sections across {total_pages} pages ({len(unique_chapters)} chapters identified) in {parse_sec}s.")
 
     # Generate metadata-rich chunks
+    _notify("Chunking sections into hierarchical passages with line-level coordinates...")
+    t_chunk = time.perf_counter()
     chunks = make_chunks(sections)
     if not chunks:
         raise ValueError("No chunks were generated from the extracted sections.")
+    chunk_sec = round(time.perf_counter() - t_chunk, 2)
+    _notify(f"Generated {len(chunks)} chunks with line-level and page-level metadata in {chunk_sec}s.")
 
     indexed_count = 0
     profile_generated = False
+    profile = None
 
     if not preview:
         # Pipeline 1: Index chunks into the book's dedicated vector DB collection
+        _notify(f"Indexing {len(chunks)} chunks into ChromaDB collection '{kb_name}' (Cosine space)...")
+        t_index = time.perf_counter()
         indexed_count = index_chunks(
             chunks=chunks,
             source=pdf_path,
             kb_name=kb_name,
         )
+        index_sec = round(time.perf_counter() - t_index, 2)
+        _notify(f"Stored {indexed_count} vector records into collection '{kb_name}' in {index_sec}s.")
 
         # Pipeline 2: Generate LLM-based book profile alongside vector indexing
+        t_profile = time.perf_counter()
         try:
             from retrieval.kb_registry import generate_book_profile, clear_kb_registry_cache
             try:
@@ -126,17 +163,50 @@ def ingest_pdf(
             # Clear cache so the new book is discoverable
             clear_kb_registry_cache()
 
+            _notify("Sampling representative excerpts from across the book for profiling...")
+            _notify("Running LLM analysis to generate summary, main topics, and key concepts...")
             profile = generate_book_profile(
                 kb_name=kb_name,
                 book_name=book_name,
                 collection_name=kb_name,
             )
+            profile_sec = round(time.perf_counter() - t_profile, 2)
             profile_generated = profile is not None
             if profile_generated:
-                print(f"📋 Book profile generated for '{book_name}' in {kb_name}")
+                _notify(f"Content profile generated and saved for '{book_name}' in {profile_sec}s.")
+            else:
+                _notify(f"Profile generated using metadata fallback in {profile_sec}s.")
         except Exception as e:
-            print(f"⚠️ Profile generation failed (non-fatal): {e}")
+            profile_sec = round(time.perf_counter() - t_profile, 2)
+            _notify(f"Profile generation note: {e}")
             profile_generated = False
+
+        _notify(f"Invalidated router, discovery, and metadata caches.")
+        _notify(f"Knowledge base '{kb_name}' is fully active and ready for routing.")
+
+    total_sec = round(time.perf_counter() - t_start, 2)
+    _notify(f"Total ingestion latency: {total_sec}s (Parse: {parse_sec}s | Chunk: {chunk_sec}s | Index: {index_sec}s | Profile: {profile_sec}s)")
+
+    latencies = {
+        "parse_sec": parse_sec,
+        "chunk_sec": chunk_sec,
+        "index_sec": index_sec,
+        "profile_sec": profile_sec,
+        "total_sec": total_sec,
+    }
+
+    if profile:
+        profile["ingestion_latency_sec"] = total_sec
+        profile["ingestion_latencies"] = latencies
+        try:
+            from retrieval.kb_registry import _load_profiles, _save_profiles
+            all_profs = _load_profiles()
+            if kb_name in all_profs:
+                all_profs[kb_name]["ingestion_latency_sec"] = total_sec
+                all_profs[kb_name]["ingestion_latencies"] = latencies
+                _save_profiles(all_profs)
+        except Exception:
+            pass
 
     return {
         "kb_name": kb_name,
@@ -144,9 +214,14 @@ def ingest_pdf(
         "chunks_count": len(chunks),
         "indexed_count": indexed_count,
         "sections_count": len(sections),
+        "chapters_count": len(unique_chapters),
+        "page_count": total_pages,
         "source": str(pdf_path),
         "preview": preview,
         "profile_generated": profile_generated,
+        "profile": profile,
+        "total_latency_sec": total_sec,
+        "latencies": latencies,
     }
 
 
@@ -259,7 +334,7 @@ def main():
 
     if args.delete_kb:
         target = args.delete_kb.strip()
-        print(f"\n🗑️ Deleting knowledge base: '{target}'...")
+        print(f"\nDeleting knowledge base: '{target}'...")
         # Check if target is a book title rather than KB ID
         from retrieval.kb_registry import get_kb_registry
         reg = get_kb_registry()
@@ -274,7 +349,7 @@ def main():
         return
 
     if args.register_existing:
-        print("\n📋 Registering existing books...")
+        print("\nRegistering existing books...")
         results = register_existing_books()
         for r in results:
             print(f"  {r['kb_name']}: {r['book_name']} → {r['status']}")

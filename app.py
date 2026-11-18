@@ -23,22 +23,21 @@ from chat_storage import (
 
 st.set_page_config(
     page_title="Agentic Book Chat",
-    page_icon="📚",
     layout="wide",
 )
 
 # Answer type display config
 _ANSWER_TYPE_META = {
-    "book":    {"icon": "📖", "label": "Book answer",    "color": "green"},
-    "web":     {"icon": "🌐", "label": "Web answer",     "color": "blue"},
-    "mixed":   {"icon": "🔀", "label": "Mixed answer",   "color": "orange"},
-    "general": {"icon": "🤖", "label": "General answer", "color": "gray"},
+    "book":    {"label": "Book Answer",    "color": "green"},
+    "web":     {"label": "Web Answer",     "color": "blue"},
+    "mixed":   {"label": "Mixed Answer",   "color": "orange"},
+    "general": {"label": "General Answer", "color": "gray"},
 }
 
 # Tool display config
 _TOOL_META = {
-    "semantic_search": {"icon": "🔍", "label": "Semantic Search & Router"},
-    "web_search":      {"icon": "🌐", "label": "Web Search"},
+    "semantic_search": {"label": "Semantic Search & Router"},
+    "web_search":      {"label": "Web Search"},
 }
 
 
@@ -48,10 +47,10 @@ def render_agent_activity(activity: List[Dict]):
     if not tool_steps:
         return
 
-    st.caption("⚡ **Tool Execution & Latency**")
+    st.caption("**Tool Execution & Latency**")
     for step_number, step in enumerate(tool_steps, start=1):
         tool_name = step.get("tool")
-        meta = _TOOL_META.get(tool_name, {"icon": "🔧", "label": tool_name or "Tool"})
+        meta = _TOOL_META.get(tool_name, {"label": tool_name or "Tool"})
 
         latency = step.get("latency_ms")
         if latency is not None:
@@ -69,29 +68,29 @@ def render_agent_activity(activity: List[Dict]):
         with col1:
             if is_no_match:
                 st.markdown(
-                    f"**{meta['icon']} {meta['label']}** (Step {step_number}) — "
-                    f"⚠️ *No matching book profile found — routing to web fallback.*"
+                    f"**{meta['label']}** (Step {step_number}) — "
+                    f"*No matching book profile found — routing to web fallback.*"
                 )
             else:
-                st.markdown(f"**{meta['icon']} {meta['label']}** (Step {step_number}) — {reason}")
+                st.markdown(f"**{meta['label']}** (Step {step_number}) — {reason}")
             
             if found_summary and not is_no_match and found_summary != tool_reasoning:
-                st.caption(f"📥 {found_summary}")
+                st.caption(found_summary)
             
             what_found = step.get("what_found_items", [])
             if what_found and not is_no_match:
-                with st.expander(f"🔎 View retrieved items ({len(what_found)})", expanded=False):
+                with st.expander(f"View retrieved items ({len(what_found)})", expanded=False):
                     for itm in what_found:
                         st.markdown(f"- {itm}")
         with col2:
-            st.caption(f"⏱️ `{latency_str}`")
+            st.caption(f"Latency: `{latency_str}`")
 
 
 # --------------------------------------------------
 # Ingestion Dialog
 # --------------------------------------------------
 
-@st.dialog("📥 Ingest New Book")
+@st.dialog("Ingest New Book")
 def show_ingest_dialog():
     st.caption("Upload PDF book(s). Each book is placed in its own isolated knowledge base with an automatic LLM content profile.")
     dialog_files = st.file_uploader("Select PDF Book", type=["pdf"], accept_multiple_files=True, key="dialog_book_uploader")
@@ -110,12 +109,12 @@ def show_ingest_dialog():
     )
     
     if dialog_files:
-        if st.button("🚀 Ingest & Index", type="primary", use_container_width=True):
+        if st.button("Ingest & Index", type="primary", use_container_width=True):
             upload_dir = ROOT / "uploads"
             upload_dir.mkdir(exist_ok=True)
             with st.status("Ingesting book into isolated collection...", expanded=True) as status:
                 for idx, uf in enumerate(dialog_files, start=1):
-                    status.write(f"📖 Processing ({idx}/{len(dialog_files)}): **{uf.name}**...")
+                    status.write(f"**File ({idx}/{len(dialog_files)}): {uf.name}**")
                     temp_path = upload_dir / uf.name
                     with open(temp_path, "wb") as f:
                         f.write(uf.getbuffer())
@@ -125,15 +124,40 @@ def show_ingest_dialog():
                             pdf_path=temp_path,
                             book_name=b_name,
                             overwrite=overwrite_existing,
+                            progress_callback=lambda msg: status.write(f"- {msg}"),
                         )
-                        p_msg = "📋 Profile generated" if summary.get("profile_generated") else "⚠️ Profile pending"
+                        status.write(f"**Ingestion complete for '{summary['book_name']}' (`{summary['kb_name']}`)**")
                         status.write(
-                            f"✅ **{summary['book_name']}** indexed into **`{summary['kb_name']}`** "
-                            f"({summary['indexed_count']} chunks across {summary['sections_count']} sections). {p_msg}"
+                            f"- Indexed Chunks: `{summary['indexed_count']}` across `{summary['sections_count']}` sections "
+                            f"({summary.get('page_count', 0)} pages, {summary.get('chapters_count', 0)} chapters)"
                         )
+
+                        # Latency breakdown
+                        lats = summary.get("latencies", {})
+                        total_s = summary.get("total_latency_sec", 0.0)
+                        if lats:
+                            status.write(
+                                f"- Latency — Total: `{total_s}s` "
+                                f"| Parse: `{lats.get('parse_sec', 0)}s` "
+                                f"| Chunk: `{lats.get('chunk_sec', 0)}s` "
+                                f"| Index: `{lats.get('index_sec', 0)}s` "
+                                f"| Profile: `{lats.get('profile_sec', 0)}s`"
+                            )
+
+                        prof = summary.get("profile")
+                        if prof:
+                            with st.expander("Generated Book Profile", expanded=True):
+                                if prof.get("summary"):
+                                    st.markdown(f"**Summary:** {prof['summary']}")
+                                if prof.get("main_topics"):
+                                    st.markdown(f"**Topics:** {', '.join(prof['main_topics'][:8])}")
+                                if prof.get("key_concepts"):
+                                    st.markdown(f"**Key Concepts:** {', '.join(prof['key_concepts'][:8])}")
+                                if prof.get("coverage"):
+                                    st.markdown(f"**Coverage:** {prof['coverage']}")
                     except Exception as err:
-                        status.write(f"❌ Failed to ingest {uf.name}: {err}")
-                status.update(label="🎉 Ingestion Complete!", state="complete", expanded=False)
+                        status.write(f"Failed to ingest {uf.name}: {err}")
+                status.update(label="Ingestion and profiling complete", state="complete", expanded=True)
             st.success("Book successfully ingested and available for routing!")
             st.rerun()
 
@@ -145,14 +169,14 @@ def show_ingest_dialog():
 knowledge_bases = list_knowledge_bases()
 
 with st.sidebar:
-    st.title("📚 Multi-Source Knowledge Bases")
+    st.title("Knowledge Bases")
 
-    st.success(
-        "✅ The agent autonomously decides which books to search. "
+    st.info(
+        "The agent autonomously decides which books to search. "
         "No manual selection needed — it reasons dynamically from your question."
     )
 
-    if st.button("➕ Ingest New Book", use_container_width=True, key="sidebar_ingest_btn"):
+    if st.button("Ingest New Book", use_container_width=True, key="sidebar_ingest_btn"):
         show_ingest_dialog()
 
     if knowledge_bases:
@@ -174,9 +198,9 @@ with st.sidebar:
         # Show book profiles
         profiles = get_all_book_profiles()
         if profiles:
-            st.markdown("### 📋 Book Profiles (LLM-Generated)")
+            st.markdown("### Book Profiles (LLM-Generated)")
             for p in profiles:
-                with st.expander(f"📖 {p.get('kb_name', p['kb_id'])}"):
+                with st.expander(f"{p.get('kb_name', p['kb_id'])}"):
                     if p.get("summary"):
                         st.markdown(f"**Summary:** {p['summary']}")
                     if p.get("main_topics"):
@@ -190,19 +214,19 @@ with st.sidebar:
         registry = get_kb_registry()
         unregistered = [kb for kb in knowledge_bases if kb not in registry]
         if unregistered:
-            if st.button("📋 Generate Missing Profiles", use_container_width=True):
+            if st.button("Generate Missing Profiles", use_container_width=True):
                 with st.spinner("Generating profiles for unregistered books..."):
                     results = register_existing_books()
                     for r in results:
                         if r["status"] == "profile_generated":
-                            st.success(f"✅ {r['book_name']} profiled")
+                            st.success(f"{r['book_name']} profiled")
                         elif r["status"] != "already_profiled":
-                            st.warning(f"⚠️ {r['book_name']}: {r['status']}")
+                            st.warning(f"{r['book_name']}: {r['status']}")
                 st.rerun()
 
         st.divider()
 
-        st.markdown("### 🔍 Chunk Inspector *(read-only)*")
+        st.markdown("### Chunk Inspector *(read-only)*")
         st.caption("Browse raw chunks stored in a collection.")
 
         viewer_kb = st.selectbox(
@@ -265,7 +289,7 @@ with st.sidebar:
 
         st.divider()
 
-        with st.expander("🗑️ Delete a Knowledge Base", expanded=False):
+        with st.expander("Delete Knowledge Base", expanded=False):
             st.caption("Permanently delete an indexed book, all its stored vector chunks, and its profile.")
             del_kb_target = st.selectbox(
                 "Select Knowledge Base to delete:",
@@ -277,7 +301,7 @@ with st.sidebar:
                 f"I want to permanently delete **{del_kb_target}**",
                 key="confirm_del_checkbox",
             )
-            if st.button("🗑️ Delete Permanently", type="primary", use_container_width=True, disabled=not confirm_del, key="execute_delete_btn"):
+            if st.button("Delete Permanently", type="primary", use_container_width=True, disabled=not confirm_del, key="execute_delete_btn"):
                 with st.spinner(f"Deleting {del_kb_target}..."):
                     delete_knowledge_base(del_kb_target)
                 st.success(f"Knowledge base **{del_kb_target}** and its chunks were deleted.")
@@ -288,7 +312,7 @@ with st.sidebar:
 # Main Chat UI
 # --------------------------------------------------
 
-st.title("📚 Autonomous Agentic Book Chat")
+st.title("Autonomous Book Chat")
 st.caption(
     "Ask any question about indexed books, chapters, sections, pages, or lines. "
     "The agent dynamically decides which collections to search, reasons about its strategy, and synthesizes answers with citations."
@@ -297,7 +321,7 @@ st.caption(
 # Session management in sidebar
 with st.sidebar:
     st.divider()
-    st.markdown("### 💬 Chat Sessions")
+    st.markdown("### Chat Sessions")
     
     all_sessions = get_all_sessions()
     if "current_session" not in st.session_state:
@@ -325,13 +349,13 @@ with st.sidebar:
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🗑️ Clear Chat", use_container_width=True):
+        if st.button("Clear Chat", use_container_width=True):
             clear_chat_history(st.session_state.current_session)
             st.session_state.messages = []
             st.rerun()
     
     with col2:
-        if st.button("➕ New Session", use_container_width=True):
+        if st.button("New Session", use_container_width=True):
             st.session_state.show_new_session_input = True
     
     # Show input for new session name
@@ -344,7 +368,7 @@ with st.sidebar:
         )
         if new_session_name:
             clean_session_name = new_session_name.strip().replace(" ", "_")
-            if st.button("✅ Create Session", use_container_width=True):
+            if st.button("Create Session", use_container_width=True):
                 # Save empty chat to create the session file immediately
                 save_chat_history([], clean_session_name)
                 st.session_state.current_session = clean_session_name
@@ -352,7 +376,7 @@ with st.sidebar:
                 st.session_state.show_new_session_input = False
                 st.rerun()
         
-        if st.button("❌ Cancel", use_container_width=True):
+        if st.button("Cancel", use_container_width=True):
             st.session_state.show_new_session_input = False
             st.rerun()
 
@@ -366,12 +390,12 @@ for message in st.session_state.messages:
         # Answer type badge for replayed assistant messages
         if message["role"] == "assistant" and message.get("answer_type"):
             at_meta = _ANSWER_TYPE_META.get(message["answer_type"], _ANSWER_TYPE_META["book"])
-            st.caption(f"{at_meta['icon']} **{at_meta['label']}**")
+            st.caption(f"**{at_meta['label']}**")
 
         st.markdown(message["content"])
 
         if message.get("reasoning"):
-            with st.expander("🧠 Agent Dynamic Reasoning & Strategy", expanded=False):
+            with st.expander("Agent Reasoning & Strategy", expanded=False):
                 st.markdown(message["reasoning"])
 
         if message.get("activity"):
@@ -382,7 +406,7 @@ for message in st.session_state.messages:
             web_sources  = [s for s in message["sources"] if s.get("source") == "web"]
 
             if book_sources:
-                with st.expander("📖 Book Sources & Citations"):
+                with st.expander("Book Sources & Citations"):
                     for source in book_sources:
                         lines_info = (
                             f", lines {source['line_start']}-{source['line_end']}"
@@ -398,7 +422,7 @@ for message in st.session_state.messages:
                         st.write(source["text"])
 
             if web_sources:
-                with st.expander("🌐 Web Sources"):
+                with st.expander("Web Sources"):
                     for source in web_sources:
                         st.markdown(
                             f"**[{source['id']}] [{source.get('title', source['id'])}]({source.get('url', '')})**"
@@ -407,26 +431,39 @@ for message in st.session_state.messages:
 
 
 if not knowledge_bases:
-    st.info("👋 No books have been indexed yet. Use the **➕ Ingest PDF Book** button below to get started!")
+    st.info("No books have been indexed yet. Use the '+' button below to get started.")
 
 if not st.session_state.messages and knowledge_bases:
     st.info(
-        "💡 **Ask any question to get started. Examples:**\n"
-        "- 📖 **Multi-Book Comparison**: *'Compare focus and distraction in Mind Management and Deep Work'* *(agent queries both collections & explains why)*\n"
-        "- 🎯 **Line & Page Lookup**: *'What does line 12 of page 10 say in Mind Management?'* *(precise metadata retrieval)*\n"
-        "- 📚 **Chapter Deep Dive**: *'What are the core arguments in Deep Work chapter 1?'* *(chapter-filtered retrieval)*\n"
-        "- 🌐 **External / Web Query**: *'Who is the CEO of Google and what are recent AI developments?'* *(agent detects topic is outside books & switches to web search)*"
+        "**Example questions to get started:**\n\n"
+        "- **Multi-Book Comparison**: *Compare focus and distraction in Mind Management and Deep Work*\n"
+        "- **Metadata Lookup**: *What does line 12 of page 10 say in Mind Management?*\n"
+        "- **Chapter Deep Dive**: *What are the core arguments in Deep Work chapter 1?*\n"
+        "- **External Query**: *Who is the CEO of Google and what are recent AI developments?*"
     )
 
-# Bottom chat bar layout: [➕ Ingest] button on the left, [Chat Input] on the right
-upload_col, input_col = st.columns([1, 11])
+# Fixed bottom composer: [+] button and [Chat Input] anchored together in a single row
+st.markdown(
+    """
+    <style>
+    /* Ensure the scrollable conversation area has padding so messages are never hidden behind the fixed bottom composer */
+    .main .block-container {
+        padding-bottom: 7.5rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-with upload_col:
-    if st.button("➕", help="Ingest a new PDF book into its own collection", use_container_width=True, key="bottom_ingest_btn"):
-        show_ingest_dialog()
+with st.bottom:
+    upload_col, input_col = st.columns([1, 11], vertical_alignment="bottom")
 
-with input_col:
-    question = st.chat_input("Ask a question across indexed books or any external/web topic...")
+    with upload_col:
+        if st.button("+", help="Ingest a new PDF book into its own collection", use_container_width=True, key="bottom_ingest_btn"):
+            show_ingest_dialog()
+
+    with input_col:
+        question = st.chat_input("Ask a question across indexed books or any external/web topic...")
 
 if question:
     st.session_state.messages.append(
@@ -442,7 +479,7 @@ if question:
     history = [
         {
             "role": message["role"],
-            "content": message["content"],
+        "content": message["content"],
         }
         for message in st.session_state.messages[:-1]
     ]
@@ -473,12 +510,12 @@ if question:
 
             # Answer type badge
             at_meta = _ANSWER_TYPE_META.get(answer_type, _ANSWER_TYPE_META["book"])
-            st.caption(f"{at_meta['icon']} **{at_meta['label']}**")
+            st.caption(f"**{at_meta['label']}**")
 
             st.markdown(answer)
 
             if reasoning:
-                with st.expander("🧠 Agent Dynamic Reasoning & Strategy", expanded=True):
+                with st.expander("Agent Reasoning & Strategy", expanded=True):
                     st.markdown(reasoning)
 
             if activity:
@@ -490,7 +527,7 @@ if question:
                 web_sources  = [s for s in sources if s.get("source") == "web"]
 
                 if book_sources:
-                    with st.expander("📖 Book Sources & Citations"):
+                    with st.expander("Book Sources & Citations"):
                         for source in book_sources:
                             lines_info = (
                                 f", lines {source['line_start']}-{source['line_end']}"
@@ -506,7 +543,7 @@ if question:
                             st.write(source["text"])
 
                 if web_sources:
-                    with st.expander("🌐 Web Sources"):
+                    with st.expander("Web Sources"):
                         for source in web_sources:
                             st.markdown(
                                 f"**[{source['id']}] [{source.get('title', source['id'])}]({source.get('url', '')})**"
