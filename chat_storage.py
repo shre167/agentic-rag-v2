@@ -55,4 +55,35 @@ def get_all_sessions() -> list[str]:
         f.stem.replace("_session", "")
         for f in CHAT_HISTORY_DIR.glob("*_session.json")
     ]
-    return sorted(sessions)
+    if "default" not in sessions:
+        sessions.insert(0, "default")
+    return sorted(list(set(sessions)))
+
+
+def get_cross_session_summary(current_session_id: str = "default", max_turns_per_session: int = 2) -> str:
+    """
+    Summarize previous queries from other sessions so the LLM remembers
+    what topics/queries were explored previously across sessions.
+    """
+    all_sessions = get_all_sessions()
+    other_sessions = [s for s in all_sessions if s != current_session_id]
+    if not other_sessions:
+        return ""
+
+    summary_lines = []
+    for s_id in other_sessions:
+        history = load_chat_history(s_id)
+        user_queries = [
+            turn["content"]
+            for turn in history
+            if turn.get("role") == "user" and turn.get("content")
+        ]
+        if user_queries:
+            recent_queries = user_queries[-max_turns_per_session:]
+            queries_str = "; ".join(f'"{q}"' for q in recent_queries)
+            summary_lines.append(f"- Session '{s_id}': {queries_str}")
+
+    if not summary_lines:
+        return ""
+
+    return "Past topics/queries explored in other sessions:\n" + "\n".join(summary_lines)

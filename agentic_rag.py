@@ -162,12 +162,13 @@ def answer_with_agent(
     history: list[dict] | None = None,
     k: int = 5,
     kb_name: str | None = None,
+    cross_session_context: str = "",
 ) -> AgentResult:
     """Run the modular LangChain agent and return a validated answer, sources, activity, reasoning, and answer_type."""
 
     # Inject conversation history into the thread-local context so the
-    # semantic router can use it for pronoun resolution and memory queries.
-    set_chat_context(history)
+    # semantic router can use it for pronoun resolution, memory queries, and cross-session context.
+    set_chat_context(history, cross_session_info=cross_session_context)
 
     # Load LLM configuration.
     api_key = os.getenv("GE_API_KEY")
@@ -196,7 +197,20 @@ def answer_with_agent(
             "but you are free to query any or all collections as needed."
         )
 
+    # Build conversation messages with optional cross-session note
+    conversation_prefix = []
+    if cross_session_context:
+        conversation_prefix.append({
+            "role": "user",
+            "content": f"[System Context Note: User previously explored these queries across other sessions:\n{cross_session_context}]",
+        })
+        conversation_prefix.append({
+            "role": "assistant",
+            "content": "Understood, I am aware of the user's previous topics and sessions for context.",
+        })
+
     messages = [
+        *conversation_prefix,
         *list(history or [])[-6:],
         {
             "role": "user",
@@ -301,11 +315,13 @@ def answer_with_agent(
 
         if tool_name == "web_search":
             items = payload.get("items", [])
-            if items:
-                what_found_items = items
-                found_summary = f"Found {len(items)} web result(s)"
+            passages = payload.get("passages", [])
+            if passages or items:
+                what_found_items = items if items else [p.get("title", "Result") for p in passages]
+                found_summary = f"Found {len(passages) if passages else len(items)} web result(s)"
             else:
-                found_summary = "No web results found."
+                raw_res = payload.get("result", "")
+                found_summary = raw_res if raw_res else "No web results found."
         elif tool_name == "semantic_search":
             if is_no_match:
                 found_summary = f"NO_MATCH — {result_text}"

@@ -48,6 +48,11 @@ def ingest_pdf(
 ) -> dict:
     """
     Extract, chunk with structure-aware metadata, and index a PDF into a dedicated knowledge base.
+    Also generates an LLM-based book profile alongside the vector indexing.
+
+    Pipeline:
+      1. Document processing: Extraction → Chunking → Embeddings → Vector DB (per-book collection)
+      2. Book profiling: Extracted content → LLM analysis → Summary + topic profile → KB Registry
 
     Args:
         pdf_path: Path to the PDF file.
@@ -57,7 +62,8 @@ def ingest_pdf(
         preview: If True, extracts and chunks without writing to ChromaDB.
 
     Returns:
-        dict: Ingestion summary including kb_name, book_name, chunks_count, and sections_count.
+        dict: Ingestion summary including kb_name, book_name, chunks_count, sections_count,
+              and profile_generated status.
     """
     pdf_path = Path(pdf_path).resolve()
     if not pdf_path.exists():
@@ -87,12 +93,34 @@ def ingest_pdf(
         raise ValueError("No chunks were generated from the extracted sections.")
 
     indexed_count = 0
+    profile_generated = False
+
     if not preview:
+        # Pipeline 1: Index chunks into the book's dedicated vector DB collection
         indexed_count = index_chunks(
             chunks=chunks,
             source=pdf_path,
             kb_name=kb_name,
         )
+
+        # Pipeline 2: Generate LLM-based book profile alongside vector indexing
+        try:
+            from retrieval.kb_registry import generate_book_profile, clear_kb_registry_cache
+
+            # Clear cache so the new book is discoverable
+            clear_kb_registry_cache()
+
+            profile = generate_book_profile(
+                kb_name=kb_name,
+                book_name=book_name,
+                collection_name=kb_name,
+            )
+            profile_generated = profile is not None
+            if profile_generated:
+                print(f"📋 Book profile generated for '{book_name}' in {kb_name}")
+        except Exception as e:
+            print(f"⚠️ Profile generation failed (non-fatal): {e}")
+            profile_generated = False
 
     return {
         "kb_name": kb_name,
@@ -102,12 +130,71 @@ def ingest_pdf(
         "sections_count": len(sections),
         "source": str(pdf_path),
         "preview": preview,
+        "profile_generated": profile_generated,
     }
+
+
+def register_existing_books() -> list[dict]:
+    """
+    Generate profiles for all previously ingested books that don't have profiles yet.
+    Does NOT re-index or duplicate any vector records.
+    """
+    from retrieval.kb_registry import (
+        get_kb_registry,
+        generate_book_profile,
+        _load_profiles,
+        clear_kb_registry_cache,
+    )
+
+    clear_kb_registry_cache()
+    existing_profiles = _load_profiles()
+    results = []
+
+    for kb_name in list_knowledge_bases():
+        if kb_name in existing_profiles:
+            results.append({
+                "kb_name": kb_name,
+                "status": "already_profiled",
+                "book_name": existing_profiles[kb_name].get("kb_name", "Unknown"),
+            })
+            continue
+
+        try:
+            col = get_collection(kb_name)
+            count = col.count()
+            if count == 0:
+                continue
+
+            # Get book name from metadata
+            sample = col.get(limit=5, include=["metadatas"])["metadatas"]
+            titles = sorted({m.get("book", "") for m in sample if m.get("book")})
+            book_title = titles[0] if titles else kb_name
+
+            profile = generate_book_profile(
+                kb_name=kb_name,
+                book_name=book_title,
+                collection_name=kb_name,
+            )
+
+            results.append({
+                "kb_name": kb_name,
+                "status": "profile_generated" if profile else "failed",
+                "book_name": book_title,
+            })
+        except Exception as e:
+            results.append({
+                "kb_name": kb_name,
+                "status": f"error: {e}",
+                "book_name": "Unknown",
+            })
+
+    clear_kb_registry_cache()
+    return results
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract, chunk, and index a PDF into an isolated knowledge base."
+        description="Extract, chunk, and index a PDF into an isolated knowledge base with LLM profiling."
     )
 
     parser.add_argument(
@@ -134,7 +221,22 @@ def main():
         help="Show chunk examples without indexing.",
     )
 
+    parser.add_argument(
+        "--register-existing",
+        action="store_true",
+        help="Generate profiles for all previously ingested books (no re-indexing).",
+    )
+
     args = parser.parse_args()
+
+    if args.register_existing:
+        print("\n📋 Registering existing books...")
+        results = register_existing_books()
+        for r in results:
+            print(f"  {r['kb_name']}: {r['book_name']} → {r['status']}")
+        print(f"\n✅ Processed {len(results)} knowledge base(s).")
+        return
+
     pdf_path = args.pdf.resolve()
 
     if not pdf_path.exists():
@@ -158,6 +260,7 @@ def main():
             print("\nPreview mode enabled. No indexing performed.")
         else:
             print(f"Indexed Chunks  : {summary['indexed_count']}")
+            print(f"Profile Generated: {'✅ Yes' if summary['profile_generated'] else '⚠️ No (fallback metadata used)'}")
             print("=" * 60)
             print("✅ Ingestion complete. Knowledge base is ready for agentic retrieval.")
             print("=" * 60)

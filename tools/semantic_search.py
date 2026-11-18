@@ -1,64 +1,19 @@
 """
-Simple Semantic Search Tool with Auto-Routing
-==============================================
-- Automatically discovers available KBs from ChromaDB
-- Searches all KBs if no book specified
-- Searches specific KB if book name mentioned
-- Works with any number of books (dynamic)
+Semantic Search Tool with LLM-Based Profile Routing
+=====================================================
+- Routes queries using LLM reasoning over book profiles
+- Searches ONLY the selected KB (no all-KB fallback)
+- Returns NO_MATCH if no book is relevant
+- Each book is stored in its own separate collection
 """
 
-import re
 import json
+import time
 from langchain.tools import tool
 
-from retrieval.vector_store import list_knowledge_bases
+from retrieval.semantic_router import route_query
 from retrieval.retrieval import retrieve_chunks
-
-
-# KB Book name mappings - automatically discovered
-KB_BOOK_MAP = {
-    "kb1": "mind management",
-    "kb2": "deep work",
-}
-
-
-def _get_available_kbs():
-    """Get list of all available KBs from ChromaDB."""
-    return list_knowledge_bases()
-
-
-def _detect_kbs_from_query(query: str) -> list:
-    """
-    Simple logic to detect which KB(s) to search.
-    - If book name mentioned → search that KB
-    - If explicit comparison words ("compare", "both") → search all KBs
-    - Otherwise → search all KBs
-    """
-    query_lower = query.lower()
-    selected_kbs = []
-    
-    # Check if any book is mentioned
-    for kb_name, book_keywords in KB_BOOK_MAP.items():
-        if book_keywords in query_lower:
-            selected_kbs.append(kb_name)
-    
-    # Check for EXPLICIT comparison words (not just "and")
-    comparison_words = ["compare", "both", "difference", "versus", "vs"]
-    is_explicit_comparison = any(word in query_lower for word in comparison_words)
-    
-    # If explicit comparison → search all KBs (even if a book was mentioned)
-    if is_explicit_comparison:
-        available = _get_available_kbs()
-        if available:
-            return available
-    
-    # If a specific book was mentioned → search only that KB
-    if selected_kbs:
-        return selected_kbs
-    
-    # If no specific book mentioned → search all KBs
-    available = _get_available_kbs()
-    return available if available else []
+from retrieval.kb_registry import get_kb_registry
 
 
 @tool
@@ -68,107 +23,118 @@ def semantic_search(
     k: int = 5,
 ) -> str:
     """
-    Search books with automatic KB routing.
-    
+    Search books with LLM-based profile routing.
+
     Args:
         query: Search term or concept
-        kb_name: Specific KB to search (optional). If empty, auto-detects.
-        k: Number of results per KB (default 5)
-    
+        kb_name: Specific KB to search (optional). If empty, the LLM router
+                 selects the best KB based on book profiles.
+        k: Number of results (default 5)
+
     How routing works:
-    - If kb_name provided → search that KB
-    - If no kb_name → auto-detect which KB(s) to search
-    - If book name in query → search that book
-    - If comparison ("both", "compare") → search all KBs
-    - Otherwise → search all KBs
-    
+    - If kb_name provided → search that specific KB
+    - If no kb_name → LLM analyzes book profiles to select the most relevant KB
+    - If no book matches the query → returns NO_MATCH
+    - Never searches all KBs as a fallback
+
     Returns:
-        Passages with metadata from searched KB(s)
+        Passages with metadata from the selected KB, or NO_MATCH
     """
-    import time
     start_time = time.time()
-    
-    # Auto-extract page number from query
-    parsed_page = None
-    page_match = re.search(r"\bpage\s*(\d+)\b", query, re.IGNORECASE)
-    if page_match:
-        parsed_page = int(page_match.group(1))
-    
-    # Determine which KBs to search
+
+    # Determine which KB to search
     if kb_name and kb_name.strip():
-        # Explicit KB provided
-        target_kbs = [kb_name.strip()]
-        routing_reason = f"Explicit KB specified: {kb_name}"
+        # Explicit KB provided — validate it exists
+        registry = get_kb_registry()
+        target_kb = kb_name.strip()
+        if target_kb not in registry:
+            result_data = {
+                "tool": "semantic_search",
+                "input": query,
+                "result": f"NO_MATCH: Knowledge base '{target_kb}' not found.",
+                "passages": [],
+                "items": [],
+                "tool_reasoning": f"Specified KB '{target_kb}' does not exist.",
+                "latency_ms": (time.time() - start_time) * 1000,
+            }
+            return json.dumps(result_data, ensure_ascii=False)
+
+        routing_reason = f"Explicit KB specified: {target_kb}"
+        sub_query = query
+        parsed_page = None
+        parsed_line = None
+        parsed_chapter = None
+
+        import re
+        page_match = re.search(r"\bpage\s*(\d+)\b", query, re.IGNORECASE)
+        if page_match:
+            parsed_page = int(page_match.group(1))
+
     else:
-        # Auto-detect from query
-        target_kbs = _detect_kbs_from_query(query)
-        if not target_kbs:
-            routing_reason = "No matching books found in query"
-        elif len(target_kbs) > 1:
-            routing_reason = f"Multi-book search detected: {', '.join(target_kbs)}"
-        else:
-            routing_reason = f"Book mentioned in query: {target_kbs[0]}"
-    
-    if not target_kbs:
-        result_data = {
-            "tool": "semantic_search",
-            "input": query,
-            "result": "No knowledge bases found.",
-            "passages": [],
-            "items": [],
-            "tool_reasoning": routing_reason,
-            "latency_ms": (time.time() - start_time) * 1000,
-        }
-        return json.dumps(result_data, ensure_ascii=False)
-    
-    # Search each KB and collect results
-    all_passages = []
-    searched_kbs = []
-    
-    for kb in target_kbs:
-        passages = retrieve_chunks(
-            query=query,
-            kb_name=kb,
-            k=k,
-            page=parsed_page,
-        )
-        
-        if passages:
-            # Ensure each passage has correct KB metadata
-            for p in passages:
-                p["kb_name"] = kb  # Explicitly set KB name
-            all_passages.extend(passages)
-            searched_kbs.append(kb)
-    
-    # Build search description
-    kbs_str = ", ".join(searched_kbs) if searched_kbs else "none"
-    search_desc = f'"{query}" [kb: {kbs_str}]'
+        # LLM-based routing using book profiles
+        route_result = route_query(query)
+
+        if not route_result["is_match"]:
+            result_data = {
+                "tool": "semantic_search",
+                "input": query,
+                "result": f"NO_MATCH: {route_result['reason']}",
+                "passages": [],
+                "items": [],
+                "tool_reasoning": route_result["reason"],
+                "latency_ms": (time.time() - start_time) * 1000,
+            }
+            return json.dumps(result_data, ensure_ascii=False)
+
+        target_kb = route_result["selected_kb"]
+        sub_query = route_result["sub_query"]
+        parsed_page = route_result.get("page")
+        parsed_line = route_result.get("line")
+        parsed_chapter = route_result.get("chapter")
+        routing_reason = route_result["reason"]
+
+    # Retrieve passages from the SINGLE selected KB only
+    passages = retrieve_chunks(
+        query=sub_query,
+        kb_name=target_kb,
+        k=k,
+        page=parsed_page,
+        line=parsed_line,
+        chapter=parsed_chapter,
+    )
+
+    # Tag passages with KB metadata
+    if passages:
+        for p in passages:
+            p["kb_name"] = target_kb
+
+    search_desc = f'"{query}" [kb: {target_kb}]'
     if parsed_page:
         search_desc += f", page: {parsed_page}"
-    
-    if not all_passages:
+
+    if not passages:
         result_data = {
             "tool": "semantic_search",
             "input": search_desc,
-            "result": f"No relevant passages found in {kbs_str}.",
+            "result": f"No relevant passages found in {target_kb}.",
             "passages": [],
             "items": [],
             "tool_reasoning": routing_reason,
             "latency_ms": (time.time() - start_time) * 1000,
         }
         return json.dumps(result_data, ensure_ascii=False)
-    
+
     # Format items for display
-    items = [f"[{p['id']}] {p.get('book', '?')} - {p.get('section', '')}" for p in all_passages]
-    
+    items = [f"[{p['id']}] {p.get('book', '?')} - {p.get('section', '')}" for p in passages]
+
     result_data = {
         "tool": "semantic_search",
         "input": search_desc,
-        "result": f"Found {len(all_passages)} passages from {kbs_str}",
-        "passages": all_passages,
+        "result": f"Found {len(passages)} passages from {target_kb}",
+        "passages": passages,
         "items": items,
         "tool_reasoning": routing_reason,
         "latency_ms": (time.time() - start_time) * 1000,
     }
-    
+
     return json.dumps(result_data, ensure_ascii=False)

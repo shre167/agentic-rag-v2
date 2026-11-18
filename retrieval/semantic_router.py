@@ -1,11 +1,15 @@
 """
-Semantic Retrieval Router
-==========================
-Uses a two-stage hybrid approach:
-  1. Embeddings: Rapidly ranks and scores all ingested knowledge bases against the query.
-  2. LLM Decision: Reasons over candidates + conversation turns (chat history) to select
-     the best matching KB(s), resolve pronouns, extract metadata filters, or detect if the
-     query is irrelevant to indexed books.
+LLM-Based Semantic Retrieval Router
+=====================================
+Routes user queries to the most relevant knowledge base using LLM reasoning
+over book profiles, NOT by searching every KB.
+
+Flow:
+  1. Retrieve registered book profiles (summary, topics, concepts, coverage).
+  2. Pass profiles + user query + conversation history to the LLM.
+  3. LLM identifies the single most relevant book based on content and coverage.
+  4. Returns the corresponding KB ID and collection name.
+  5. Returns NO_MATCH if no registered book is relevant.
 """
 
 import json
@@ -15,7 +19,7 @@ from typing import Dict, Any, List
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
-from retrieval.kb_registry import find_kb_candidates, get_kb_registry
+from retrieval.kb_registry import get_all_book_profiles, get_kb_registry
 from retrieval.chat_context import format_chat_history_for_prompt
 from settings import ROOT
 
@@ -42,166 +46,138 @@ def _get_router_llm() -> ChatOpenAI | None:
     return _router_llm
 
 
+def _format_profiles_for_prompt(profiles: List[Dict[str, Any]]) -> str:
+    """Format book profiles into a structured text block for the LLM."""
+    if not profiles:
+        return "No books are currently registered."
+
+    parts = []
+    for p in profiles:
+        topics = ", ".join(p.get("main_topics", [])[:10]) or "N/A"
+        concepts = ", ".join(p.get("key_concepts", [])[:10]) or "N/A"
+        parts.append(
+            f"- KB ID: `{p['kb_id']}`\n"
+            f"  Book: \"{p['kb_name']}\"\n"
+            f"  Collection: `{p.get('collection_name', p['kb_id'])}`\n"
+            f"  Summary: {p.get('summary', 'N/A')}\n"
+            f"  Main Topics: {topics}\n"
+            f"  Key Concepts: {concepts}\n"
+            f"  Coverage: {p.get('coverage', 'N/A')}\n"
+            f"  Chunks: {p.get('total_chunks', 0)}"
+        )
+    return "\n\n".join(parts)
+
+
 def route_query(
     query: str,
     chat_history: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """
-    Route a user query using embeddings + LLM reasoning over chat history.
+    Route a user query to the best matching KB using LLM reasoning over book profiles.
 
     Returns:
         dict: {
             "is_match": bool,
-            "selected_kbs": list[str],
-            "sub_queries": dict[str, str],
+            "selected_kb": str | None,       # Single KB ID
+            "collection_name": str | None,    # Corresponding collection
+            "sub_query": str,                 # Refined search query
             "chapter": str | None,
             "page": int | None,
             "line": int | None,
             "reason": str,
         }
     """
-    candidates = find_kb_candidates(query)
-    if not candidates:
+    profiles = get_all_book_profiles()
+    if not profiles:
         return {
             "is_match": False,
-            "selected_kbs": [],
-            "sub_queries": {},
+            "selected_kb": None,
+            "collection_name": None,
+            "sub_query": query,
             "chapter": None,
             "page": None,
             "line": None,
-            "reason": "No knowledge bases are currently indexed in ChromaDB.",
+            "reason": "No knowledge bases are currently registered.",
         }
 
-    # Format candidate summary for LLM prompt
-    kb_summaries = []
-    for c in candidates:
-        chapters_str = ", ".join(c["chapters"]) if c["chapters"] else "General"
-        kb_summaries.append(
-            f"- `{c['kb_name']}`: \"{c['book_title']}\" (Embedding similarity: {c['similarity']:.2f}, Chapters: {chapters_str})"
-        )
-    catalog_text = "\n".join(kb_summaries)
-
-    # Format recent conversation context
-    formatted_history = format_chat_history_for_prompt()
-
-    # Pre-extract direct page/line/chapter hints if present in query
+    # Pre-extract direct page/line/chapter hints
     page_match = re.search(r"\bpage\s*(\d+)\b", query, re.IGNORECASE)
     line_match = re.search(r"\bline\s*(\d+)\b", query, re.IGNORECASE)
     extracted_page = int(page_match.group(1)) if page_match else None
     extracted_line = int(line_match.group(1)) if line_match else None
 
-    # ─────────────────────────────────────────────────────────────
-    # Fast-Path 1: Direct Title / Author Keyword Match (0 ms)
-    # ─────────────────────────────────────────────────────────────
-    q_lower = query.lower()
-    for c in candidates:
-        title_words = [w for w in c["book_title"].lower().split() if len(w) > 3]
-        if c["book_title"].lower() in q_lower or (title_words and all(w in q_lower for w in title_words)):
-            return {
-                "is_match": True,
-                "selected_kbs": [c["kb_name"]],
-                "sub_queries": {c["kb_name"]: query},
-                "chapter": None,
-                "page": extracted_page,
-                "line": extracted_line,
-                "reason": f"Direct title match: '{c['book_title']}'",
-            }
+    # Format book profiles and conversation context
+    profiles_text = _format_profiles_for_prompt(profiles)
+    formatted_history = format_chat_history_for_prompt()
 
-    top = candidates[0]
-    runner_up = candidates[1] if len(candidates) > 1 else None
-
-    # ─────────────────────────────────────────────────────────────
-    # Fast-Path 2: Decisive Embedding Similarity Match (< 2 ms)
-    # Avoids redundant LLM round-trip when similarity is confident.
-    # ─────────────────────────────────────────────────────────────
-    is_comparative = bool(re.search(r"\b(compare|both|difference|versus|vs)\b", q_lower))
-
-    if is_comparative and runner_up and top["similarity"] >= 0.22 and runner_up["similarity"] >= 0.22:
-        selected = [top["kb_name"], runner_up["kb_name"]]
-        return {
-            "is_match": True,
-            "selected_kbs": selected,
-            "sub_queries": {kb: query for kb in selected},
-            "chapter": None,
-            "page": extracted_page,
-            "line": extracted_line,
-            "reason": f"Comparative match across {top['book_title']} ({top['similarity']:.2f}) and {runner_up['book_title']} ({runner_up['similarity']:.2f})",
-        }
-
-    if top["similarity"] >= 0.25 and (runner_up is None or (top["similarity"] - runner_up["similarity"]) >= 0.05):
-        return {
-            "is_match": True,
-            "selected_kbs": [top["kb_name"]],
-            "sub_queries": {top["kb_name"]: query},
-            "chapter": None,
-            "page": extracted_page,
-            "line": extracted_line,
-            "reason": f"High confidence embedding match with {top['book_title']} ({top['similarity']:.2f})",
-        }
-
-    # ─────────────────────────────────────────────────────────────
-    # Fast-Path 3: Irrelevant Query Check - REMOVED
-    # Always try to search books, even with low similarity
-    # Let the actual retrieval decide if results are useful
-    # ─────────────────────────────────────────────────────────────
-
-    # ─────────────────────────────────────────────────────────────
-    # Ambiguous / Boundary Case: Use Router LLM as Tiebreaker
-    # ─────────────────────────────────────────────────────────────
+    # Build the LLM prompt
     llm = _get_router_llm()
     if llm is None:
-        # Fallback to top embedding candidate
+        # If no LLM available, return NO_MATCH — do NOT search all KBs
         return {
-            "is_match": True,
-            "selected_kbs": [top["kb_name"]],
-            "sub_queries": {top["kb_name"]: query},
+            "is_match": False,
+            "selected_kb": None,
+            "collection_name": None,
+            "sub_query": query,
             "chapter": None,
-            "page": extracted_page,
-            "line": extracted_line,
-            "reason": f"Fallback to {top['book_title']} by embedding similarity ({top['similarity']:.2f}).",
+            "page": None,
+            "line": None,
+            "reason": "Router LLM unavailable. Cannot route without LLM.",
         }
 
-    system_instruction = f"""You are the Semantic Retrieval Router for an Agentic RAG system with multi-book collections.
+    # Build the valid KB IDs list for validation
+    valid_kb_ids = [p["kb_id"] for p in profiles]
 
-Available Knowledge Bases (ranked by embedding relevance):
-{catalog_text}
+    system_instruction = f"""You are the Semantic Router for a book-grounded RAG system.
 
-Recent Conversation Context (Chat History):
+Your task: Given a user query, select the SINGLE most relevant book to search, or return NO_MATCH.
+
+REGISTERED BOOKS AND THEIR PROFILES:
+{profiles_text}
+
+CONVERSATION HISTORY (for context and follow-up resolution):
 {formatted_history}
 
-User Query: "{query}"
+USER QUERY: "{query}"
 
-Instructions:
-1. Determine `is_match`:
-   - Set to `true` if the query is asking about topics, concepts, chapters, pages, or authors covered in ANY indexed book, OR if it refers to topics discussed in the chat history.
-   - Set to `false` if the query is clearly outside the scope of all indexed books (e.g. current live news, stock prices, weather, sports scores, or unrelated trivia).
-2. Select `selected_kbs`:
-   - List the relevant kb_name(s).
-   - If the query compares multiple books (e.g. "compare focus in both books"), select ALL relevant KBs (e.g. ["kb1", "kb2"]).
-   - If `is_match` is false, return `[]`.
-3. Provide `sub_queries`:
-   - A mapping of each selected kb_name to a refined search query.
-   - Resolve any conversational pronouns (e.g., replace "he", "that concept", "the author" using the chat history).
-4. Extract `chapter`, `page`, `line` if specifically requested.
-5. Provide a 1-sentence `reason` explaining the routing decision.
+INSTRUCTIONS:
+1. Analyze the query against each book's summary, topics, key concepts, and coverage.
+2. Use conversation history to resolve pronouns ("it", "this", "that book") and understand follow-ups.
+3. Select the SINGLE most relevant book. Do NOT select multiple books.
+4. If the query is clearly outside ALL books' scope (e.g., current news, weather, sports, unrelated trivia), set is_match to false.
+5. Extract chapter, page, or line numbers if specifically mentioned in the query.
+6. Generate a refined sub_query that removes book-name references and focuses on the actual search intent.
 
-Respond ONLY with valid JSON (no markdown formatting, no code blocks):
+RESPOND ONLY with valid JSON (no markdown, no code blocks):
 {{
-  "is_match": true,
-  "selected_kbs": ["kb1"],
-  "sub_queries": {{"kb1": "search term"}},
-  "chapter": null,
-  "page": null,
-  "line": null,
-  "reason": "Why this KB was selected"
+    "is_match": true,
+    "selected_kb": "kb_id_here",
+    "sub_query": "refined search query without book name",
+    "chapter": null,
+    "page": null,
+    "line": null,
+    "reason": "1 sentence explaining why this book was selected"
 }}
+
+For NO_MATCH:
+{{
+    "is_match": false,
+    "selected_kb": null,
+    "sub_query": "{query}",
+    "chapter": null,
+    "page": null,
+    "line": null,
+    "reason": "1 sentence explaining why no book matches"
+}}
+
+Valid KB IDs: {valid_kb_ids}
 """
 
     try:
         response = llm.invoke(system_instruction)
         raw_text = response.content.strip()
 
-        # Clean markdown code fences if model enclosed JSON
+        # Clean markdown code fences
         if raw_text.startswith("```json"):
             raw_text = raw_text[7:]
         elif raw_text.startswith("```"):
@@ -212,53 +188,48 @@ Respond ONLY with valid JSON (no markdown formatting, no code blocks):
 
         parsed = json.loads(raw_text)
 
-        is_match = bool(parsed.get("is_match", True))
-        selected_kbs = [
-            str(kb).strip()
-            for kb in parsed.get("selected_kbs", [])
-            if str(kb).strip() in get_kb_registry()
-        ]
+        is_match = bool(parsed.get("is_match", False))
+        selected_kb = parsed.get("selected_kb")
 
-        if not selected_kbs:
+        # Validate the selected KB exists
+        registry = get_kb_registry()
+        if selected_kb and selected_kb not in registry:
+            # Try to match by partial name
+            selected_kb = None
             is_match = False
 
-        sub_queries = parsed.get("sub_queries")
-        if not isinstance(sub_queries, dict):
-            sub_queries = {kb: query for kb in selected_kbs}
+        # Get collection name
+        collection_name = None
+        if selected_kb and selected_kb in registry:
+            collection_name = registry[selected_kb].get("collection_name", selected_kb)
         else:
-            for kb in selected_kbs:
-                if kb not in sub_queries or not sub_queries[kb]:
-                    sub_queries[kb] = query
+            is_match = False
+            selected_kb = None
+
+        sub_query = parsed.get("sub_query", query)
+        if not isinstance(sub_query, str) or not sub_query.strip():
+            sub_query = query
 
         return {
             "is_match": is_match,
-            "selected_kbs": selected_kbs,
-            "sub_queries": sub_queries,
+            "selected_kb": selected_kb,
+            "collection_name": collection_name,
+            "sub_query": sub_query,
             "chapter": parsed.get("chapter"),
             "page": parsed.get("page") if parsed.get("page") is not None else extracted_page,
             "line": parsed.get("line") if parsed.get("line") is not None else extracted_line,
-            "reason": parsed.get("reason", f"Routed to {selected_kbs} based on semantic analysis."),
+            "reason": parsed.get("reason", "Routed based on semantic analysis."),
         }
 
     except Exception as exc:
-        # Graceful fallback: check if top candidate has high embedding similarity
-        top = candidates[0]
-        if top["similarity"] >= 0.20:
-            return {
-                "is_match": True,
-                "selected_kbs": [top["kb_name"]],
-                "sub_queries": {top["kb_name"]: query},
-                "chapter": None,
-                "page": extracted_page,
-                "line": extracted_line,
-                "reason": f"Fallback to {top['book_title']} (embedding similarity {top['similarity']:.2f}).",
-            }
+        # On LLM failure, return NO_MATCH — do NOT fall back to searching all KBs
         return {
             "is_match": False,
-            "selected_kbs": [],
-            "sub_queries": {},
+            "selected_kb": None,
+            "collection_name": None,
+            "sub_query": query,
             "chapter": None,
             "page": None,
             "line": None,
-            "reason": f"Query did not match indexed books (fallback).",
+            "reason": f"Router failed: {str(exc)[:100]}. No fallback to all-KB search.",
         }

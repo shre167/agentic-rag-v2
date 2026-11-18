@@ -4,10 +4,17 @@ from typing import List, Dict
 import streamlit as st
 
 from agentic_rag import answer_with_agent
-from ingest import ingest_pdf
+from ingest import ingest_pdf, register_existing_books
 from retrieval.vector_store import get_collection, list_knowledge_bases
+from retrieval.kb_registry import get_all_book_profiles, get_kb_registry
 from settings import ROOT
-from chat_storage import load_chat_history, save_chat_history, clear_chat_history, get_all_sessions
+from chat_storage import (
+    load_chat_history,
+    save_chat_history,
+    clear_chat_history,
+    get_all_sessions,
+    get_cross_session_summary,
+)
 
 
 st.set_page_config(
@@ -50,7 +57,7 @@ def render_agent_activity(activity: List[Dict]):
 
         found_summary = step.get("found_summary", "")
         tool_reasoning = step.get("tool_reasoning", "")
-        is_no_match = "NO_MATCH" in found_summary
+        is_no_match = "NO_MATCH" in found_summary or "NO_MATCH" in str(step.get("result", ""))
 
         reason = tool_reasoning or found_summary or "Executed for query context"
 
@@ -59,12 +66,19 @@ def render_agent_activity(activity: List[Dict]):
             if is_no_match:
                 st.markdown(
                     f"**{meta['icon']} {meta['label']}** (Step {step_number}) — "
-                    f"⚠️ No matching book found — routing to web search."
+                    f"⚠️ *No matching book profile found — routing to web fallback.*"
                 )
             else:
                 st.markdown(f"**{meta['icon']} {meta['label']}** (Step {step_number}) — {reason}")
+            
             if found_summary and not is_no_match and found_summary != tool_reasoning:
-                st.caption(f"📄 {found_summary}")
+                st.caption(f"📥 {found_summary}")
+            
+            what_found = step.get("what_found_items", [])
+            if what_found and not is_no_match:
+                with st.expander(f"🔎 View retrieved items ({len(what_found)})", expanded=False):
+                    for itm in what_found:
+                        st.markdown(f"- {itm}")
         with col2:
             st.caption(f"⏱️ `{latency_str}`")
 
@@ -122,9 +136,10 @@ with st.sidebar:
                             book_name=b_name,
                         )
                         ingested_summaries.append(summary)
+                        profile_msg = "📋 Profile generated" if summary.get('profile_generated') else "⚠️ Profile pending"
                         status.write(
                             f"✅ **{summary['book_name']}** indexed into **`{summary['kb_name']}`** "
-                            f"({summary['indexed_count']} chunks across {summary['sections_count']} sections)."
+                            f"({summary['indexed_count']} chunks across {summary['sections_count']} sections). {profile_msg}"
                         )
                     except Exception as err:
                         status.write(f"❌ Failed to ingest {uploaded_file.name}: {err}")
@@ -155,6 +170,35 @@ with st.sidebar:
         st.markdown("### Indexed Books")
         for kb, (title, count) in kb_info.items():
             st.markdown(f"- **`{kb}`** → *{title}* ({count} chunks)")
+
+        # Show book profiles
+        profiles = get_all_book_profiles()
+        if profiles:
+            st.markdown("### 📋 Book Profiles (LLM-Generated)")
+            for p in profiles:
+                with st.expander(f"📖 {p.get('kb_name', p['kb_id'])}"):
+                    if p.get("summary"):
+                        st.markdown(f"**Summary:** {p['summary']}")
+                    if p.get("main_topics"):
+                        st.markdown(f"**Topics:** {', '.join(p['main_topics'][:8])}")
+                    if p.get("key_concepts"):
+                        st.markdown(f"**Key Concepts:** {', '.join(p['key_concepts'][:8])}")
+                    if p.get("coverage"):
+                        st.markdown(f"**Coverage:** {p['coverage']}")
+
+        # Button to register existing books that don't have profiles
+        registry = get_kb_registry()
+        unregistered = [kb for kb in knowledge_bases if kb not in registry]
+        if unregistered:
+            if st.button("📋 Generate Missing Profiles", use_container_width=True):
+                with st.spinner("Generating profiles for unregistered books..."):
+                    results = register_existing_books()
+                    for r in results:
+                        if r["status"] == "profile_generated":
+                            st.success(f"✅ {r['book_name']} profiled")
+                        elif r["status"] != "already_profiled":
+                            st.warning(f"⚠️ {r['book_name']}: {r['status']}")
+                st.rerun()
 
         st.divider()
 
@@ -236,17 +280,33 @@ with st.sidebar:
     st.markdown("### 💬 Chat Sessions")
     
     all_sessions = get_all_sessions()
-    current_session = st.selectbox(
+    if "current_session" not in st.session_state:
+        st.session_state.current_session = all_sessions[0] if all_sessions else "default"
+
+    # Ensure current_session is in all_sessions
+    if st.session_state.current_session not in all_sessions:
+        all_sessions.append(st.session_state.current_session)
+        all_sessions = sorted(list(set(all_sessions)))
+
+    current_idx = all_sessions.index(st.session_state.current_session) if st.session_state.current_session in all_sessions else 0
+
+    def on_session_change():
+        selected = st.session_state.session_selector
+        st.session_state.current_session = selected
+        st.session_state.messages = load_chat_history(selected)
+
+    selected_session = st.selectbox(
         "Select session",
-        options=all_sessions or ["default"],
-        index=0 if all_sessions else 0,
+        options=all_sessions,
+        index=current_idx,
         key="session_selector",
+        on_change=on_session_change,
     )
     
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🗑️ Clear Chat", use_container_width=True):
-            clear_chat_history(current_session)
+            clear_chat_history(st.session_state.current_session)
             st.session_state.messages = []
             st.rerun()
     
@@ -263,22 +323,22 @@ with st.sidebar:
             key="new_session_name_input",
         )
         if new_session_name:
+            clean_session_name = new_session_name.strip().replace(" ", "_")
             if st.button("✅ Create Session", use_container_width=True):
-                st.session_state.current_session = new_session_name
-                st.session_state.show_new_session_input = False
+                # Save empty chat to create the session file immediately
+                save_chat_history([], clean_session_name)
+                st.session_state.current_session = clean_session_name
                 st.session_state.messages = []
+                st.session_state.show_new_session_input = False
                 st.rerun()
         
         if st.button("❌ Cancel", use_container_width=True):
             st.session_state.show_new_session_input = False
             st.rerun()
 
-# Load chat history from persistent storage
+# Load chat history for the active session
 if "messages" not in st.session_state:
-    st.session_state.messages = load_chat_history(current_session)
-
-if "current_session" not in st.session_state:
-    st.session_state.current_session = current_session
+    st.session_state.messages = load_chat_history(st.session_state.current_session)
 
 
 for message in st.session_state.messages:
@@ -364,10 +424,12 @@ if question:
     try:
         with st.chat_message("assistant"):
             with st.spinner("Agent analyzing query, dynamically choosing collections, and retrieving chunks..."):
+                cross_context = get_cross_session_summary(st.session_state.current_session)
                 result = answer_with_agent(
                     question,
                     history=history,
                     kb_name=None,  # No hardcoding - agent dynamically decides
+                    cross_session_context=cross_context,
                 )
 
             answer = result[0]
