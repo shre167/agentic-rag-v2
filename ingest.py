@@ -3,7 +3,12 @@ import re
 from pathlib import Path
 
 from chunking import extract_sections, make_chunks
-from retrieval.vector_store import get_collection, index_chunks, list_knowledge_bases
+from retrieval.vector_store import (
+    get_collection,
+    index_chunks,
+    list_knowledge_bases,
+    delete_knowledge_base,
+)
 from settings import DEFAULT_PDF
 
 
@@ -45,6 +50,7 @@ def ingest_pdf(
     book_name: str | None = None,
     kb_name: str | None = None,
     preview: bool = False,
+    overwrite: bool = False,
 ) -> dict:
     """
     Extract, chunk with structure-aware metadata, and index a PDF into a dedicated knowledge base.
@@ -60,6 +66,7 @@ def ingest_pdf(
         kb_name: Target knowledge base (e.g. 'kb1', 'kb2', 'kb3').
                  If None, automatically reuses existing KB for this book or creates the next 'kbN'.
         preview: If True, extracts and chunks without writing to ChromaDB.
+        overwrite: If True, removes existing chunks and profile for this KB before re-indexing.
 
     Returns:
         dict: Ingestion summary including kb_name, book_name, chunks_count, sections_count,
@@ -81,6 +88,10 @@ def ingest_pdf(
         existing_kb = find_kb_for_book(book_name)
         kb_name = existing_kb if existing_kb else get_next_kb_name()
     kb_name = kb_name.strip()
+
+    # If overwrite requested and KB already exists, purge it completely first
+    if not preview and overwrite and kb_name in list_knowledge_bases():
+        delete_knowledge_base(kb_name)
 
     # Extract sections with chapter, heading, page, and line metadata
     sections = extract_sections(pdf_path=pdf_path, book_name=book_name)
@@ -227,12 +238,40 @@ def main():
     )
 
     parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Wipe and overwrite the knowledge base if it already exists.",
+    )
+
+    parser.add_argument(
+        "--delete-kb",
+        metavar="KB_NAME",
+        help="Permanently delete a knowledge base and all its chunks (e.g. --delete-kb kb3).",
+    )
+
+    parser.add_argument(
         "--register-existing",
         action="store_true",
         help="Generate profiles for all previously ingested books (no re-indexing).",
     )
 
     args = parser.parse_args()
+
+    if args.delete_kb:
+        target = args.delete_kb.strip()
+        print(f"\n🗑️ Deleting knowledge base: '{target}'...")
+        # Check if target is a book title rather than KB ID
+        from retrieval.kb_registry import get_kb_registry
+        reg = get_kb_registry()
+        if target not in reg:
+            for kid, prof in reg.items():
+                if prof.get("kb_name", "").strip().casefold() == target.casefold():
+                    target = kid
+                    break
+        success = delete_knowledge_base(target)
+        if success:
+            print(f"✅ Successfully deleted '{target}' and purged all associated chunks, profiles, and caches.")
+        return
 
     if args.register_existing:
         print("\n📋 Registering existing books...")
@@ -254,6 +293,7 @@ def main():
             book_name=args.book,
             kb_name=args.kb,
             preview=args.preview,
+            overwrite=args.overwrite,
         )
 
         print(f"Target KB       : {summary['kb_name']}")

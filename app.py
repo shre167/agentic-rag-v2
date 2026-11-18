@@ -5,7 +5,11 @@ import streamlit as st
 
 from agentic_rag import answer_with_agent
 from ingest import ingest_pdf, register_existing_books
-from retrieval.vector_store import get_collection, list_knowledge_bases
+from retrieval.vector_store import (
+    get_collection,
+    list_knowledge_bases,
+    delete_knowledge_base,
+)
 from retrieval.kb_registry import get_all_book_profiles, get_kb_registry
 from settings import ROOT
 from chat_storage import (
@@ -99,6 +103,12 @@ def show_ingest_dialog():
             help="Custom title stored in metadata (defaults to file name).",
         )
     
+    overwrite_existing = st.checkbox(
+        "Overwrite & re-index if book is already ingested",
+        value=True,
+        help="Purges old vector chunks and generates a fresh profile if this book is already in the database.",
+    )
+    
     if dialog_files:
         if st.button("🚀 Ingest & Index", type="primary", use_container_width=True):
             upload_dir = ROOT / "uploads"
@@ -111,7 +121,11 @@ def show_ingest_dialog():
                         f.write(uf.getbuffer())
                     b_name = dialog_custom_name if (len(dialog_files) == 1 and dialog_custom_name) else None
                     try:
-                        summary = ingest_pdf(pdf_path=temp_path, book_name=b_name)
+                        summary = ingest_pdf(
+                            pdf_path=temp_path,
+                            book_name=b_name,
+                            overwrite=overwrite_existing,
+                        )
                         p_msg = "📋 Profile generated" if summary.get("profile_generated") else "⚠️ Profile pending"
                         status.write(
                             f"✅ **{summary['book_name']}** indexed into **`{summary['kb_name']}`** "
@@ -248,6 +262,26 @@ with st.sidebar:
                         st.write(text)
             else:
                 st.info("No chunks available in this collection.")
+
+        st.divider()
+
+        with st.expander("🗑️ Delete a Knowledge Base", expanded=False):
+            st.caption("Permanently delete an indexed book, all its stored vector chunks, and its profile.")
+            del_kb_target = st.selectbox(
+                "Select Knowledge Base to delete:",
+                options=knowledge_bases,
+                format_func=lambda k: f"{k}: {kb_info[k][0]} ({kb_info[k][1]} chunks)" if k in kb_info else k,
+                key="del_kb_dropdown",
+            )
+            confirm_del = st.checkbox(
+                f"I want to permanently delete **{del_kb_target}**",
+                key="confirm_del_checkbox",
+            )
+            if st.button("🗑️ Delete Permanently", type="primary", use_container_width=True, disabled=not confirm_del, key="execute_delete_btn"):
+                with st.spinner(f"Deleting {del_kb_target}..."):
+                    delete_knowledge_base(del_kb_target)
+                st.success(f"Knowledge base **{del_kb_target}** and its chunks were deleted.")
+                st.rerun()
 
 
 # --------------------------------------------------
