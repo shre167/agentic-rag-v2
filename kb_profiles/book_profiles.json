@@ -39,34 +39,5 @@
       "Rhythmic Scheduling"
     ],
     "coverage": "Cognitive performance, eliminating distractions, professional focus, deliberate practice."
-  },
-  "kb_test_ingest": {
-    "kb_id": "kb_test_ingest",
-    "kb_name": "Agentic Intelligence Systems",
-    "collection_name": "kb_test_ingest",
-    "summary": "Book titled 'Agentic Intelligence Systems' covering 2 chapters.",
-    "main_topics": [
-      "CHAPTER 1",
-      "CHAPTER 2"
-    ],
-    "key_concepts": [],
-    "coverage": "Covers chapters: Chapter 1, Chapter 2."
-  },
-  "kb3": {
-    "kb_id": "kb3",
-    "kb_name": "Atomic Habits",
-    "collection_name": "kb3",
-    "summary": "Focuses on tiny changes that lead to remarkable results in habit formation.",
-    "main_topics": [
-      "Habit Loops",
-      "Cue Craving Response Reward",
-      "Identity-Based Habits"
-    ],
-    "key_concepts": [
-      "1% Better Every Day",
-      "Habit Stacking",
-      "Two-Minute Rule"
-    ],
-    "coverage": "Habit formation, behavioral psychology."
   }
 }
