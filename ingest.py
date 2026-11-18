@@ -106,6 +106,11 @@ def ingest_pdf(
         # Pipeline 2: Generate LLM-based book profile alongside vector indexing
         try:
             from retrieval.kb_registry import generate_book_profile, clear_kb_registry_cache
+            try:
+                from tools.list_books import clear_book_cache
+                clear_book_cache()
+            except ImportError:
+                pass
 
             # Clear cache so the new book is discoverable
             clear_kb_registry_cache()

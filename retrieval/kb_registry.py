@@ -56,6 +56,15 @@ def _save_profiles(profiles: Dict[str, Dict[str, Any]]) -> None:
         print(f"Warning: Could not save KB profiles: {e}")
 
 
+def delete_book_profile(kb_name: str) -> None:
+    """Delete a profile from persisted storage and clear the registry cache."""
+    profiles = _load_profiles()
+    if kb_name in profiles:
+        del profiles[kb_name]
+        _save_profiles(profiles)
+    clear_kb_registry_cache()
+
+
 def _get_profile_llm() -> ChatOpenAI | None:
     """Get LLM client for profile generation."""
     api_key = os.getenv("GE_API_KEY")
@@ -289,15 +298,17 @@ def get_kb_registry() -> Dict[str, Dict[str, Any]]:
                 titles = sorted({m.get("book", "") for m in sample if m.get("book")})
                 book_title = titles[0] if titles else kb_name
 
-            # Use persisted profile if available
-            if kb_name in persisted:
+            # Use persisted profile if available and matches the book title
+            if (
+                kb_name in persisted
+                and persisted[kb_name].get("kb_name", "").strip().casefold() == book_title.strip().casefold()
+            ):
                 profile = persisted[kb_name]
-                # Ensure it has current book_title
                 profile["kb_name"] = book_title
                 profile["total_chunks"] = count
                 registry[kb_name] = profile
             else:
-                # Generate profile for unregistered book
+                # Generate profile for unregistered or updated book
                 profile = generate_book_profile(
                     kb_name=kb_name,
                     book_name=book_title,

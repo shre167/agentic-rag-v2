@@ -84,7 +84,48 @@ def render_agent_activity(activity: List[Dict]):
 
 
 # --------------------------------------------------
-# Sidebar: Dynamic Knowledge Bases & Ingestion
+# Ingestion Dialog
+# --------------------------------------------------
+
+@st.dialog("📥 Ingest New Book")
+def show_ingest_dialog():
+    st.caption("Upload PDF book(s). Each book is placed in its own isolated knowledge base with an automatic LLM content profile.")
+    dialog_files = st.file_uploader("Select PDF Book", type=["pdf"], accept_multiple_files=True, key="dialog_book_uploader")
+    dialog_custom_name = ""
+    if dialog_files and len(dialog_files) == 1:
+        dialog_custom_name = st.text_input(
+            "Book Title (optional)",
+            value=Path(dialog_files[0].name).stem.replace("_", " "),
+            help="Custom title stored in metadata (defaults to file name).",
+        )
+    
+    if dialog_files:
+        if st.button("🚀 Ingest & Index", type="primary", use_container_width=True):
+            upload_dir = ROOT / "uploads"
+            upload_dir.mkdir(exist_ok=True)
+            with st.status("Ingesting book into isolated collection...", expanded=True) as status:
+                for idx, uf in enumerate(dialog_files, start=1):
+                    status.write(f"📖 Processing ({idx}/{len(dialog_files)}): **{uf.name}**...")
+                    temp_path = upload_dir / uf.name
+                    with open(temp_path, "wb") as f:
+                        f.write(uf.getbuffer())
+                    b_name = dialog_custom_name if (len(dialog_files) == 1 and dialog_custom_name) else None
+                    try:
+                        summary = ingest_pdf(pdf_path=temp_path, book_name=b_name)
+                        p_msg = "📋 Profile generated" if summary.get("profile_generated") else "⚠️ Profile pending"
+                        status.write(
+                            f"✅ **{summary['book_name']}** indexed into **`{summary['kb_name']}`** "
+                            f"({summary['indexed_count']} chunks across {summary['sections_count']} sections). {p_msg}"
+                        )
+                    except Exception as err:
+                        status.write(f"❌ Failed to ingest {uf.name}: {err}")
+                status.update(label="🎉 Ingestion Complete!", state="complete", expanded=False)
+            st.success("Book successfully ingested and available for routing!")
+            st.rerun()
+
+
+# --------------------------------------------------
+# Sidebar: Dynamic Knowledge Bases & Profiles
 # --------------------------------------------------
 
 knowledge_bases = list_knowledge_bases()
@@ -97,63 +138,8 @@ with st.sidebar:
         "No manual selection needed — it reasons dynamically from your question."
     )
 
-    # --- Ingestion Section ---
-    st.markdown("### 📥 Ingest Book(s)")
-    st.caption("Upload PDF book(s). Each book automatically forms its own isolated knowledge base with chapter, section, page, and line metadata.")
-
-    uploaded_files = st.file_uploader(
-        "Upload PDF Book(s)",
-        type=["pdf"],
-        accept_multiple_files=True,
-        key="book_uploader",
-    )
-
-    custom_name = ""
-    if uploaded_files and len(uploaded_files) == 1:
-        custom_name = st.text_input(
-            "Book Title (optional)",
-            value=Path(uploaded_files[0].name).stem.replace("_", " "),
-            help="Custom name stored in metadata (defaults to file name).",
-        )
-
-    if uploaded_files:
-        if st.button("🚀 Ingest & Index Books", type="primary", use_container_width=True):
-            upload_dir = ROOT / "uploads"
-            upload_dir.mkdir(exist_ok=True)
-
-            with st.status("Ingesting books into isolated knowledge bases...", expanded=True) as status:
-                ingested_summaries = []
-                for file_idx, uploaded_file in enumerate(uploaded_files, start=1):
-                    status.write(f"📖 Processing ({file_idx}/{len(uploaded_files)}): **{uploaded_file.name}**...")
-                    temp_path = upload_dir / uploaded_file.name
-                    with open(temp_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-
-                    b_name = custom_name if (len(uploaded_files) == 1 and custom_name) else None
-                    try:
-                        summary = ingest_pdf(
-                            pdf_path=temp_path,
-                            book_name=b_name,
-                        )
-                        ingested_summaries.append(summary)
-                        profile_msg = "📋 Profile generated" if summary.get('profile_generated') else "⚠️ Profile pending"
-                        status.write(
-                            f"✅ **{summary['book_name']}** indexed into **`{summary['kb_name']}`** "
-                            f"({summary['indexed_count']} chunks across {summary['sections_count']} sections). {profile_msg}"
-                        )
-                    except Exception as err:
-                        status.write(f"❌ Failed to ingest {uploaded_file.name}: {err}")
-
-                status.update(label="🎉 Ingestion Complete!", state="complete", expanded=False)
-
-            if ingested_summaries:
-                st.success(f"Indexed {len(ingested_summaries)} book(s) into knowledge bases!")
-                st.rerun()
-
-    st.divider()
-
-    # Refresh knowledge bases after possible upload
-    knowledge_bases = list_knowledge_bases()
+    if st.button("➕ Ingest New Book", use_container_width=True, key="sidebar_ingest_btn"):
+        show_ingest_dialog()
 
     if knowledge_bases:
         kb_info = {}
@@ -387,10 +373,9 @@ for message in st.session_state.messages:
 
 
 if not knowledge_bases:
-    st.info("👋 No books have been indexed yet. Upload one or more PDF books in the sidebar and click **🚀 Ingest & Index Books** to get started!")
-    st.stop()
+    st.info("👋 No books have been indexed yet. Use the **➕ Ingest PDF Book** button below to get started!")
 
-if not st.session_state.messages:
+if not st.session_state.messages and knowledge_bases:
     st.info(
         "💡 **Ask any question to get started. Examples:**\n"
         "- 📖 **Multi-Book Comparison**: *'Compare focus and distraction in Mind Management and Deep Work'* *(agent queries both collections & explains why)*\n"
@@ -399,8 +384,15 @@ if not st.session_state.messages:
         "- 🌐 **External / Web Query**: *'Who is the CEO of Google and what are recent AI developments?'* *(agent detects topic is outside books & switches to web search)*"
     )
 
+# Bottom chat bar layout: [➕ Ingest] button on the left, [Chat Input] on the right
+upload_col, input_col = st.columns([1, 11])
 
-question = st.chat_input("Ask a question across indexed books or any external/web topic...")
+with upload_col:
+    if st.button("➕", help="Ingest a new PDF book into its own collection", use_container_width=True, key="bottom_ingest_btn"):
+        show_ingest_dialog()
+
+with input_col:
+    question = st.chat_input("Ask a question across indexed books or any external/web topic...")
 
 if question:
     st.session_state.messages.append(

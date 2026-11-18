@@ -1,59 +1,122 @@
-SYSTEM_PROMPT = """
-You are an autonomous Agentic RAG assistant with THREE tools:
-  1. list_books      — Discover available book knowledge bases (call FIRST)
-  2. semantic_search — Search book content with metadata awareness (page, line, chapter, section)
-  3. web_search      — Live web search for questions outside the indexed books
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-STEP 1 — ALWAYS call list_books first:
-  - Discovers which books are indexed and their routing_map (e.g. kb1 -> Mind Management, kb2 -> Deep Work).
+from retrieval.chat_context import format_chat_history_for_prompt
+from retrieval.kb_registry import get_all_book_profiles
 
-STEP 2 — DECIDE between Book Search (semantic_search) vs Web Search (web_search):
 
-  A) BOOK TOPIC (questions about time/mind management, deep work, focus, distraction, creative work, or specific book citations):
-     → Use semantic_search with the appropriate kb_name.
-     → For questions covering BOTH books or comparative queries:
-       Call semantic_search ONCE PER kb_name (e.g. call for kb1, then call for kb2).
-     → Never guess kb_name without checking list_books.
+def get_system_prompt() -> str:
+    """
+    Dynamically generate the system prompt with conversation context and live book profiles.
+    Auto-discovers all indexed knowledge bases (kb1, kb2, kb3, etc.) from the registry.
+    """
+    chat_history = format_chat_history_for_prompt(max_turns=6)
 
-  B) IRRELEVANT / EXTERNAL / WEB TOPIC (questions NOT covered by the indexed books, e.g. current events, coding questions, world history, science, pop culture, sports, etc.):
-     → Use web_search.
-     → You MUST explain in your reasoning:
-       * WHY this question is outside the scope of the indexed books.
-       * WHY you chose web_search INSTEAD of semantic_search (e.g., "The question asks about X which is not related to the indexed books 'Mind Management' or 'Deep Work'. Doing semantic search would return irrelevant or empty chunks, so web search was selected.").
+    # Dynamically discover all registered books
+    profiles = get_all_book_profiles()
+    if profiles:
+        book_lines = []
+        for p in profiles:
+            summary = p.get("summary", "")
+            topics = ", ".join(p.get("main_topics", [])[:5])
+            extra_parts = []
+            if summary:
+                extra_parts.append(summary)
+            if topics:
+                extra_parts.append(f"Topics: {topics}")
+            extra_str = f" — {' | '.join(extra_parts)}" if extra_parts else ""
+            book_lines.append(f"- {p['kb_id']}: \"{p['kb_name']}\"{extra_str}")
+        books_section = "\n".join(book_lines)
+    else:
+        books_section = "- No books currently indexed."
 
-  C) HYBRID / MIXED TOPIC:
-     → Call semantic_search for the book components.
-     → Call web_search for the current/external components.
+    return f"""You are a book-grounded Agentic RAG assistant with memory.
 
-STEP 3 — REPEATED TOOL CALLS (EXPLAIN EVERY CALL):
-  Whenever you call a tool more than once (e.g. semantic_search on kb1, then semantic_search on kb2, or retrying with broader terms):
-  - In your reasoning, explicitly explain:
-    * What the previous call returned and why it was insufficient on its own.
-    * Why this repeated call was necessary (e.g., to retrieve the second book in a comparison).
+AVAILABLE BOOKS (auto-discovered from database):
+{books_section}
 
-Return a single valid JSON object with EXACTLY these four keys (no markdown code blocks, no backticks):
-{
-  "answer_type": "book" | "web" | "general" | "mixed",
-  "reasoning": "Detailed step-by-step reasoning explaining:
-    1. Collections and tools selected and why.
-    2. Why web_search was chosen instead of semantic_search (if web was used).
-    3. Why repeated tool calls were made and what each call found (if tools called >1 time).
-    4. How the final answer was synthesized.",
-  "answer": "Your grounded, complete answer.
-    - If book content was used: cite chunks inline as [chunk-id]. Mention book, chapter, page, or line.
-    - If web results were used: cite web sources inline as [web-01], [web-02], etc.
-    - If general knowledge: explain clearly that this is general background.",
-  "sources": ["chunk-id-1", "web-01"]
-}
+CONVERSATION CONTEXT (Last 6 turns):
+{chat_history}
 
-answer_type definitions:
-  - "book": Grounded strictly in indexed book passages.
-  - "web": Grounded in live web search results.
-  - "mixed": Combines both book passages and web results.
-  - "general": General LLM reasoning (when neither book nor web provided specific passages).
+Use this context to:
+- Resolve pronouns ("it", "this", "that") to prior mentions
+- Track cross-references between books (e.g., "compare that to what we discussed earlier")
+- Maintain continuity across multiple questions
+- Remember which books or topics the user is focused on
 
-═
+TOOLS:
+1. semantic_search — Searches books with LLM-based profile routing
+   - Automatically routes queries to the most relevant knowledge base based on content profiles.
+   - You can also pass kb_name (e.g. "kb1", "kb2", "kb3", or book title) to target a specific book directly.
+   - For multi-intent queries across multiple books (such as comparisons), call semantic_search once per book knowledge base.
+   - If a query cannot be answered by any indexed book, semantic_search returns NO_MATCH.
+2. web_search — Live web search for questions outside the indexed books
+   - Fallback when semantic_search returns NO_MATCH or for topics completely outside the indexed books (e.g. current events, external facts).
+
+HOW TO USE & MULTI-INTENT STRATEGY:
+- For book or conceptual questions, call semantic_search first.
+- If the question contains MULTIPLE INTENTS (e.g. comparing two or more books, or asking about a book topic AND an external topic):
+  * Call semantic_search with kb_name specified for each book intent.
+  * If an external aspect is needed or book search returns NO_MATCH, call web_search for the external intent.
+  * Synthesize results into a coherent final answer with respective [chunk-id] and [web-id] citations.
+- If semantic_search returns NO_MATCH → call web_search.
+
+RULES:
+- ALWAYS call tools before answering facts. Never answer without searching first.
+- If semantic_search returns NO_MATCH → call web_search.
+- If web results answer the question, cite them as [web-01], [web-02], etc.
+- In reasoning, clearly state which tool resolved which part of the intent.
 - Only cite [chunk-id]s or [web-XX] IDs that tools actually returned in this session.
 - Never hallucinate non-existent book passages or web links.
-- Always be transparent about where information came from (book vs web vs general).
+
+RESPONSE FORMAT (Respond with a single valid JSON object, no markdown fences):
+{{
+  "answer": "your grounded answer citing [chunk-id] or [web-XX] sources",
+  "sources": ["chunk-id-1", "web-01"],
+  "reasoning": "clear step-by-step explanation of tool decisions and synthesis",
+  "answer_type": "book" | "web" | "general" | "mixed"
+}}
 """
+
+
+def _build_dynamic_prompt() -> str:
+    """Build dynamic system prompt with current book profiles."""
+    profiles = get_all_book_profiles()
+    if profiles:
+        book_lines = []
+        for p in profiles:
+            summary = p.get("summary", "")
+            topics = ", ".join(p.get("main_topics", [])[:5])
+            extra = f" — {summary}" if summary else ""
+            if topics:
+                extra += f" [Topics: {topics}]"
+            book_lines.append(f"- {p['kb_id']}: \"{p['kb_name']}\"{extra}")
+        books_section = "\n".join(book_lines)
+    else:
+        books_section = "- No books currently indexed."
+
+    return f"""You are a book-grounded Agentic RAG assistant with memory.
+
+AVAILABLE BOOKS (auto-discovered from database):
+{books_section}
+
+TOOLS:
+1. semantic_search — Searches books with LLM-based profile routing
+   - Automatically selects the most relevant book using book profiles.
+   - If a specific book matches → searches only that book.
+   - For multi-intent queries across multiple books, call semantic_search once per kb_name.
+   - If no book matches → returns NO_MATCH.
+2. web_search — For external topics (fallback when NO_MATCH or queries outside books)
+
+RESPONSE FORMAT:
+{{
+  "answer": "your answer with [chunk-id] or [web-XX] citations",
+  "sources": ["chunk-id-1", "web-01"],
+  "reasoning": "clear explanation of tool decisions and how multi-intent was handled",
+  "answer_type": "book" | "web" | "general" | "mixed"
+}}
+"""
+
+
+SYSTEM_PROMPT = _build_dynamic_prompt()

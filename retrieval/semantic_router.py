@@ -191,12 +191,22 @@ Valid KB IDs: {valid_kb_ids}
         is_match = bool(parsed.get("is_match", False))
         selected_kb = parsed.get("selected_kb")
 
-        # Validate the selected KB exists
+        # Validate the selected KB exists (accept KB ID like 'kb1' or book name)
         registry = get_kb_registry()
         if selected_kb and selected_kb not in registry:
-            # Try to match by partial name
-            selected_kb = None
-            is_match = False
+            # Check if router LLM returned book title instead of KB ID
+            target_str = str(selected_kb).strip().casefold()
+            matched_kb = None
+            for kid, prof in registry.items():
+                prof_name = prof.get("kb_name", "").strip().casefold()
+                if target_str == prof_name or target_str in prof_name or prof_name in target_str:
+                    matched_kb = kid
+                    break
+            if matched_kb:
+                selected_kb = matched_kb
+            else:
+                selected_kb = None
+                is_match = False
 
         # Get collection name
         collection_name = None

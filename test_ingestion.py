@@ -118,6 +118,11 @@ def main():
             print(f"Collection deletion warning: {e}")
 
         clear_book_cache()
+        try:
+            from retrieval.kb_registry import delete_book_profile
+            delete_book_profile(TEST_KB)
+        except Exception:
+            pass
 
         if test_pdf_path.exists():
             test_pdf_path.unlink()

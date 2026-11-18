@@ -2,13 +2,12 @@ import json
 import os
 import re
 
-
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 from agent.bookagent import build_agent
 from retrieval.retrieval import NO_SOURCE_ANSWER
-from retrieval.vector_store import list_knowledge_bases, get_collection
+from retrieval.chat_context import set_chat_context
 from settings import ROOT
 
 
@@ -77,32 +76,39 @@ def validate_citations(
         end = content.rfind("}")
 
         if start < 0 or end <= start:
+            if not retrieved_ids:
+                return content.strip(), [], True, None, "general"
             return NO_SOURCE_ANSWER, [], False, None, "general"
 
         try:
             payload = json.loads(content[start : end + 1])
         except json.JSONDecodeError:
+            if not retrieved_ids:
+                return content.strip(), [], True, None, "general"
             return NO_SOURCE_ANSWER, [], False, None, "general"
 
     if not isinstance(payload, dict):
+        if not retrieved_ids:
+            return content.strip(), [], True, None, "general"
         return NO_SOURCE_ANSWER, [], False, None, "general"
 
     answer = payload.get("answer")
-    source_ids = payload.get("sources")
+    source_ids = payload.get("sources", [])
     reasoning = payload.get("reasoning")
     answer_type = payload.get("answer_type", "book")
 
     if not isinstance(reasoning, str):
         reasoning = None
     if answer_type not in {"book", "web", "general", "mixed"}:
-        answer_type = "book"
+        answer_type = "general" if not retrieved_ids else "book"
 
-    if (
-        not isinstance(answer, str)
-        or not isinstance(source_ids, list)
-        or any(not isinstance(source_id, str) for source_id in source_ids)
-    ):
+    if not isinstance(answer, str):
+        if not retrieved_ids:
+            return content.strip(), [], True, reasoning, "general"
         return NO_SOURCE_ANSWER, [], False, reasoning, answer_type
+
+    if not isinstance(source_ids, list):
+        source_ids = []
 
     # Remove duplicate source IDs.
     source_ids = list(dict.fromkeys(source_ids))
@@ -156,8 +162,13 @@ def answer_with_agent(
     history: list[dict] | None = None,
     k: int = 5,
     kb_name: str | None = None,
+    cross_session_context: str = "",
 ) -> AgentResult:
     """Run the modular LangChain agent and return a validated answer, sources, activity, reasoning, and answer_type."""
+
+    # Inject conversation history into the thread-local context so the
+    # semantic router can use it for pronoun resolution, memory queries, and cross-session context.
+    set_chat_context(history, cross_session_info=cross_session_context)
 
     # Load LLM configuration.
     api_key = os.getenv("GE_API_KEY")
@@ -175,7 +186,7 @@ def answer_with_agent(
         base_url=base_url,
     )
 
-    # Build the agent (list_books + semantic_search + web_search).
+    # Build the agent (semantic_search + web_search with live profiles).
     agent = build_agent(llm)
 
     # Optionally inject a soft context hint (never constrains routing).
@@ -186,7 +197,20 @@ def answer_with_agent(
             "but you are free to query any or all collections as needed."
         )
 
+    # Build conversation messages with optional cross-session note
+    conversation_prefix = []
+    if cross_session_context:
+        conversation_prefix.append({
+            "role": "user",
+            "content": f"[System Context Note: User previously explored these queries across other sessions:\n{cross_session_context}]",
+        })
+        conversation_prefix.append({
+            "role": "assistant",
+            "content": "Understood, I am aware of the user's previous topics and sessions for context.",
+        })
+
     messages = [
+        *conversation_prefix,
         *list(history or [])[-6:],
         {
             "role": "user",
@@ -195,11 +219,15 @@ def answer_with_agent(
     ]
 
     # Execute agent.
-    result = agent.invoke({"messages": messages})
+    try:
+        result = agent.invoke({"messages": messages})
+    except Exception as e:
+        err = str(e)
+        activity = [{"action": "Agent error", "result": err, "citation_status": "rejected"}]
+        return AgentResult(NO_SOURCE_ANSWER, [], activity, None, "general")
 
     activity = []
     passages_by_id = {}
-
     web_search_used = False
 
     # Walk the full message sequence in order.
@@ -254,68 +282,49 @@ def answer_with_agent(
             if kb_match:
                 kb_param = kb_match.group(1)
 
-        # Synthesize clear 'why_called' reasoning if LLM thought was empty.
+        # Genuine LLM thought for why this tool was called (not hardcoded).
         why_called = thought_for_this_call
-        why_repeated = None
-        why_web_instead_of_semantic = None
-
-        if tool_name == "list_books":
-            if not why_called:
-                why_called = "Discover all indexed book collections and build the routing map to match user question to knowledge bases."
-
-        elif tool_name == "semantic_search":
-            passages = payload.get("passages", [])
-            if not why_called:
-                if kb_param:
-                    why_called = f"Query collection '{kb_param}' for book passages matching the user's question."
+        
+        # Try to get tool_reasoning from payload first, then fall back to dynamic logic
+        tool_reasoning = payload.get("tool_reasoning", "")
+        
+        if not why_called:
+            if tool_reasoning:
+                why_called = tool_reasoning
+            elif tool_name == "semantic_search":
+                result_text = payload.get("result", "")
+                if "NO_MATCH" in result_text:
+                    why_called = "No relevant books found in knowledge base; fallback to web search."
                 else:
-                    why_called = "Search indexed book content using semantic search and metadata filters."
+                    why_called = result_text
+            elif tool_name == "web_search":
+                why_called = "Searching external web sources since indexed books did not cover this topic."
+            else:
+                why_called = f"Execute {tool_name}"
 
-            # Explain repeated tool calls.
-            if call_num > 1:
-                prev_semantic = [c for c in previous_calls if c["tool"] == "semantic_search"]
-                if prev_semantic:
-                    last_call = prev_semantic[-1]
-                    last_kb = last_call.get("kb_param")
-                    if last_kb and kb_param and last_kb != kb_param:
-                        why_repeated = (
-                            f"Multi-source retrieval: Step previously searched '{last_kb}'. "
-                            f"This repeated call queries '{kb_param}' so the agent can gather cross-book "
-                            f"evidence and compare perspectives across multiple books."
-                        )
-                    else:
-                        why_repeated = (
-                            f"Follow-up query: Search #{call_num} in this collection with adjusted filters/terms "
-                            f"to ensure complete coverage."
-                        )
-
-        elif tool_name == "web_search":
+        if tool_name == "web_search":
             web_search_used = True
-            if not why_called:
-                why_called = f"Search live web for external topic '{raw_input}'."
-            why_web_instead_of_semantic = (
-                "The topic is outside the scope of the indexed books ('Mind Management' & 'Deep Work'). "
-                "Web search was chosen instead of book semantic search to retrieve accurate live facts "
-                "and prevent hallucinating non-existent book passages."
-            )
 
         # Build detailed 'what_found' summary.
         what_found_items = []
         passages = payload.get("passages", [])
-        web_results = payload.get("web_results", [])
-        routing_map = payload.get("routing_map")
 
-        if tool_name == "list_books" and routing_map:
-            what_found_items = [f"{kb} -> {title}" for kb, title in routing_map.items()]
-            found_summary = f"Discovered {len(routing_map)} collection(s): " + ", ".join(what_found_items)
-        elif tool_name == "web_search":
-            if web_results:
-                what_found_items = [f"[{r['rank']}] {r['title']} ({r.get('url','')})" for r in web_results]
-                found_summary = f"Found {len(web_results)} web article(s) via {payload.get('engine', 'web')}"
+        result_text = payload.get("result", "")
+        is_no_match = "NO_MATCH" in result_text
+
+        if tool_name == "web_search":
+            items = payload.get("items", [])
+            passages = payload.get("passages", [])
+            if passages or items:
+                what_found_items = items if items else [p.get("title", "Result") for p in passages]
+                found_summary = f"Found {len(passages) if passages else len(items)} web result(s)"
             else:
-                found_summary = "No web results found."
+                raw_res = payload.get("result", "")
+                found_summary = raw_res if raw_res else "No web results found."
         elif tool_name == "semantic_search":
-            if passages:
+            if is_no_match:
+                found_summary = f"NO_MATCH — {result_text}"
+            elif passages:
                 books_found = sorted({p.get("book", "?") for p in passages})
                 sections_found = [p.get("section", "") for p in passages[:3] if p.get("section")]
                 sections_str = f" in '{', '.join(sections_found)}'" if sections_found else ""
@@ -327,32 +336,25 @@ def answer_with_agent(
                         f"pp.{p.get('page_start','?')}-{p.get('page_end','?')}{lines_str} — {p.get('section','')}"
                     )
             else:
-                found_summary = "No matching chunks found for this query in the selected collection."
+                found_summary = "No matching chunks found — query may be outside indexed books."
         else:
-            found_summary = payload.get("result", "Completed")
+            found_summary = result_text or "Completed"
 
         activity_step = {
             "step": len(activity) + 1,
             "tool": tool_name,
             "call_number": call_num,
             "input": raw_input,
-            "kb_param": kb_param,
-            "result": payload.get("result", ""),
+            "result": result_text,
             "found_summary": found_summary,
             "what_found_items": what_found_items,
             "matches": len(passages),
-            "routing_map": routing_map,
-            "web_results": web_results if tool_name == "web_search" else None,
-            "tool_reasoning": why_called,
-            "why_repeated": why_repeated,
-            "why_web_instead_of_semantic": why_web_instead_of_semantic,
+            "tool_reasoning": why_called,  # Include the reasoning
+            "latency_ms": payload.get("latency_ms"),
         }
 
         previous_calls.append(activity_step)
         activity.append(activity_step)
-
-        if tool_name == "calculator":
-            calculator_used = True
 
         for passage in passages:
             if isinstance(passage, dict) and isinstance(passage.get("id"), str):
@@ -404,8 +406,27 @@ def answer_with_agent(
             "answer_type": answer_type,
         })
 
+    # Check if a specific page lookup hit an empty page (e.g. cover art or image)
+    empty_page_found = next(
+        (step.get("result") for step in activity if "EMPTY_PAGE" in step.get("result", "")),
+        None,
+    )
+    if empty_page_found and not passages_by_id:
+        clean_msg = empty_page_found.replace("EMPTY_PAGE:", "").strip()
+        final_empty_answer = (
+            f"Nothing was retrieved for this page. {clean_msg}"
+        )
+        activity.append(
+            {
+                "action": "Generate grounded answer",
+                "result": final_empty_answer,
+                "citation_status": "empty_page",
+            }
+        )
+        return AgentResult(final_empty_answer, [], activity, reasoning, "book")
+
     # Allow general answers (no sources required) and web answers.
-    if not passages_by_id and not calculator_used and answer_type == "book":
+    if not passages_by_id and answer_type == "book":
         activity.append(
             {
                 "action": "Generate grounded answer",

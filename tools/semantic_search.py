@@ -44,20 +44,30 @@ def semantic_search(
 
     # Determine which KB to search
     if kb_name and kb_name.strip():
-        # Explicit KB provided — validate it exists
+        # Explicit KB provided — validate it exists or match by book title
         registry = get_kb_registry()
         target_kb = kb_name.strip()
         if target_kb not in registry:
-            result_data = {
-                "tool": "semantic_search",
-                "input": query,
-                "result": f"NO_MATCH: Knowledge base '{target_kb}' not found.",
-                "passages": [],
-                "items": [],
-                "tool_reasoning": f"Specified KB '{target_kb}' does not exist.",
-                "latency_ms": (time.time() - start_time) * 1000,
-            }
-            return json.dumps(result_data, ensure_ascii=False)
+            target_clean = target_kb.casefold()
+            matched_id = None
+            for kid, prof in registry.items():
+                prof_name = prof.get("kb_name", "").strip().casefold()
+                if target_clean == prof_name or target_clean in prof_name or prof_name in target_clean:
+                    matched_id = kid
+                    break
+            if matched_id:
+                target_kb = matched_id
+            else:
+                result_data = {
+                    "tool": "semantic_search",
+                    "input": query,
+                    "result": f"NO_MATCH: Knowledge base '{target_kb}' not found.",
+                    "passages": [],
+                    "items": [],
+                    "tool_reasoning": f"Specified KB '{target_kb}' does not exist.",
+                    "latency_ms": (time.time() - start_time) * 1000,
+                }
+                return json.dumps(result_data, ensure_ascii=False)
 
         routing_reason = f"Explicit KB specified: {target_kb}"
         sub_query = query
